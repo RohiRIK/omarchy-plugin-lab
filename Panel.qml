@@ -89,6 +89,12 @@ Panel {
       Quickshell.execDetached(["python3", root.collector, "seen", plugin.id])
   }
 
+  function setArchived(plugin, archived) {
+    root.expandedId = ""
+    archiveProc.command = ["python3", root.collector, archived ? "archive" : "unarchive", plugin.id]
+    archiveProc.running = true
+  }
+
   function openUrl(url) {
     if (url)
       Quickshell.execDetached(["xdg-open", url])
@@ -145,6 +151,12 @@ Panel {
         root.refresh(false)
       }
     }
+  }
+
+  Process {
+    id: archiveProc
+    running: false
+    onExited: root.refresh(false)
   }
 
   Timer {
@@ -363,7 +375,7 @@ Panel {
 
                 // lifecycle: one pip per stage, filled up to where the plugin is
                 Row {
-                  visible: row.p.mine
+                  visible: row.p.mine && !Model.isArchived(row.p)
                   spacing: Style.space(3)
                   Repeater {
                     model: Model.stageCount()
@@ -539,6 +551,21 @@ Panel {
                     bordered: true
                     fontSize: Style.font.caption
                     onClicked: root.openUrl(row.p.ci.url)
+                  }
+                  Button {
+                    visible: Model.canArchive(row.p)
+                    text: "Archive"
+                    tooltipText: "Stop tracking this plugin here. Nothing is uninstalled or changed on GitHub."
+                    bordered: true
+                    fontSize: Style.font.caption
+                    onClicked: root.setArchived(row.p, true)
+                  }
+                  Button {
+                    visible: Model.canUnarchive(row.p)
+                    text: "Unarchive"
+                    bordered: true
+                    fontSize: Style.font.caption
+                    onClicked: root.setArchived(row.p, false)
                   }
                   Button {
                     text: "Open"

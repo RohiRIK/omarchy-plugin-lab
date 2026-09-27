@@ -10,6 +10,8 @@ function test(name, fn) { tests.push([name, fn]) }
 
 var mineBroken = { id: "a", name: "Zed", mine: true, health: "error", stage: "needs-fixes", unseen: 2, stars: 3, forks: 1, activityAt: 50, repo: "me/zed" }
 var mineOk = { id: "b", name: "Alpha", mine: true, health: "ok", stage: "listed", stars: 9, activityAt: 100 }
+var gone = { id: "d", name: "Old", mine: true, health: "ok", stage: "archived", archived: "github", stars: 50 }
+var shelved = { id: "e", name: "Shelved", mine: true, health: "ok", stage: "archived", archived: "here" }
 var theirs = { id: "c", name: "Beta", mine: false, health: "warn", stage: "installed", author: "Ajex" }
 
 test("stages walk the lifecycle in order", function () {
@@ -41,6 +43,26 @@ test("filters and search", function () {
   assert.strictEqual(Model.countFor(all, "mine"), 2)
 })
 
+test("archived plugins live only under their own filter and out of the counts", function () {
+  var all = [theirs, mineOk, mineBroken, gone, shelved]
+  var ids = function (f) { return Model.visibleRows(all, f, "", "name").map(function (p) { return p.id }) }
+  assert.deepStrictEqual(ids("all"), ["b", "a", "c"])
+  assert.deepStrictEqual(ids("mine"), ["b", "a"])
+  assert.deepStrictEqual(ids("archived"), ["d", "e"])
+  var s = Model.summarize(all)
+  assert.strictEqual(s.archived, 2)
+  assert.strictEqual(s.mine, 2)
+  assert.strictEqual(s.stars, 12)
+})
+
+test("archive and unarchive buttons", function () {
+  assert.ok(Model.canArchive(mineOk))
+  assert.ok(!Model.canArchive(theirs))
+  assert.ok(!Model.canArchive(shelved))
+  assert.ok(Model.canUnarchive(shelved))
+  assert.ok(!Model.canUnarchive(gone))
+})
+
 test("stats line only for your GitHub plugins", function () {
   assert.strictEqual(Model.statsLine(mineBroken), "★ 3  ⑂ 1  󰈈 0")
   assert.strictEqual(Model.statsLine(theirs), "")
@@ -59,7 +81,7 @@ test("sortPlugins does not mutate its input", function () {
 
 test("summary counts broken plugins and unread comments", function () {
   var s = Model.summarize([mineBroken, mineOk, theirs])
-  assert.deepStrictEqual(s, { mine: 2, installed: 1, errors: 1, warnings: 1, unseen: 2, listed: 1, stars: 12, forks: 1 })
+  assert.deepStrictEqual(s, { mine: 2, installed: 1, errors: 1, warnings: 1, unseen: 2, listed: 1, stars: 12, forks: 1, archived: 0 })
   assert.strictEqual(Model.badge(s), "3")
   assert.ok(Model.summaryLine(s).indexOf("2 new comments") >= 0)
 })

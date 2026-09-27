@@ -31,8 +31,13 @@ The bar icon shows a count of broken plugins plus unread comments.
   marked stale when the tree changes.
 - Links to GitHub, the CI run, the marketplace issue, the test log and the folder.
 
-Filter (all, needs attention, mine, in review, listed, others), search, and
-sort by health, stage, activity, stars or name.
+- **Archive** a plugin you no longer need: it moves to the Archived filter and
+  stops raising issues. Nothing is uninstalled and nothing changes on GitHub;
+  **Unarchive** brings it back. Repos archived on GitHub are detected and
+  archived automatically. The list lives in `~/.config/omarchy-plugin-lab/archived.json`.
+
+Filter (all, needs attention, mine, in review, listed, others, archived),
+search, and sort by health, stage, activity, stars or name.
 
 ## Install
 
@@ -51,7 +56,7 @@ Environment overrides: `PLUGIN_LAB_WORK_DIRS` (colon-separated, default
 
 ```bash
 omarchy plugin remove rohirik.plugin-lab
-rm -rf ~/.cache/omarchy-plugin-lab
+rm -rf ~/.cache/omarchy-plugin-lab ~/.config/omarchy-plugin-lab
 ```
 
 ## Tests

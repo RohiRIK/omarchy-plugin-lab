@@ -8,6 +8,8 @@ Subcommands (all print JSON on stdout):
   prompt <id>        the prompt `fix` would hand the agent
   fix <id>           open the default agent in the plugin's working copy
   seen <id>          mark the plugin's comments as read
+  archive <id>       stop tracking a plugin you no longer need (reversible)
+  unarchive <id>     track it again
 
 Plugins come from two places: the ones installed in ~/.config/omarchy/plugins,
 and git working copies of plugins under PLUGIN_LAB_WORK_DIRS (default ~/Work).
@@ -21,7 +23,8 @@ Stages for your own plugins, in order:
   needs-fixes  marketplace reviewers asked for changes
   listed       listed on the marketplace at your current commit
   update       listed, but a newer commit is waiting for (or needs) verification
-Plugins someone else wrote are "installed".
+Plugins someone else wrote are "installed". A plugin you archived here, or
+whose GitHub repo is archived, is "archived": it stops raising issues.
 
 Nothing here pushes, tags, submits or edits a plugin. GitHub is only read,
 through `gh`, with results cached so an open panel does not hammer the API.
@@ -41,6 +44,8 @@ WORK_DIRS = [Path(p).expanduser() for p in
              os.environ.get("PLUGIN_LAB_WORK_DIRS", str(HOME / "Work")).split(":") if p]
 CACHE_DIR = Path(os.environ.get("PLUGIN_LAB_CACHE_DIR",
                                 Path(os.environ.get("XDG_CACHE_HOME", HOME / ".cache")) / "omarchy-plugin-lab"))
+CONFIG_DIR = Path(os.environ.get("PLUGIN_LAB_CONFIG_DIR",
+                                 Path(os.environ.get("XDG_CONFIG_HOME", HOME / ".config")) / "omarchy-plugin-lab"))
 UPSTREAM = os.environ.get("PLUGIN_LAB_UPSTREAM", "omacom/omarchy")
 MARKETPLACE = os.environ.get("PLUGIN_LAB_MARKETPLACE", "omacom/omarchy-plugin-marketplace")
 CI_TTL = 300
@@ -245,6 +250,22 @@ def first_line(body):
     return ""
 
 
+def archived_here():
+    return read_json(CONFIG_DIR / "archived.json", {}) or {}
+
+
+def set_archived(pid, archived):
+    if not find(pid):
+        return {"error": f"No plugin {pid}"}
+    state = archived_here()
+    if archived:
+        state[pid] = {"at": int(time.time())}
+    else:
+        state.pop(pid, None)
+    write_json(CONFIG_DIR / "archived.json", state)
+    return {"archived" if archived else "unarchived": pid}
+
+
 def mark_seen(pid):
     seen = read_json(CACHE_DIR / "seen.json", {}) or {}
     seen[pid] = int(time.time())
@@ -389,6 +410,7 @@ def inspect(pid, where, owners, enabled, fetch=False, market=None):
         "hasTests": test_command(src) is not None,
     }
     info.update(git_state(src, fetch))
+    info["archived"] = "here" if pid in archived_here() else ""
     if version and info["git"]:
         _, tags, _ = git(src, "tag", "--list", f"v{version}", version)
         info["versionTagged"] = bool(tags)
@@ -414,10 +436,13 @@ def inspect(pid, where, owners, enabled, fetch=False, market=None):
     # -- GitHub (own plugins only) ------------------------------------------
     if info["mine"] and info["repo"]:
         repo = info["repo"]
-        vis = cached("repos.json", repo, REPO_TTL, lambda: (
-            lambda r: r[1] if r[0] == 0 and r[1] else None)(
-            run(["gh", "repo", "view", repo, "--json", "visibility", "-q", ".visibility"])), fetch)
-        info["visibility"] = (vis or "").lower()
+        meta = cached("repo-meta.json", repo, REPO_TTL,
+                      lambda: gh_json("repo", "view", repo, "--json", "visibility,isArchived"), fetch) or {}
+        info["visibility"] = str(meta.get("visibility") or "").lower()
+        if meta.get("isArchived"):
+            info["archived"] = "github"
+    if info["mine"] and info["repo"] and not info["archived"]:
+        repo = info["repo"]
         branch = info["branch"] or "main"
 
         def ci_now():
@@ -452,7 +477,9 @@ def inspect(pid, where, owners, enabled, fetch=False, market=None):
                              + [c["at"] for c in talk])
 
     # -- stage -----------------------------------------------------------------
-    if not info["mine"]:
+    if info["archived"]:
+        stage = "archived"
+    elif not info["mine"]:
         stage = "installed"
     elif not info["git"]:
         stage = "local"
@@ -544,10 +571,17 @@ def inspect(pid, where, owners, enabled, fetch=False, market=None):
     elif info["enabled"] is False:
         issue("info", "disabled", "Installed but not enabled")
 
+    # Archived: nothing to do, except remember it may still be on your bar.
+    if info["archived"]:
+        issues[:] = [{"level": "info", "code": "archived",
+                      "text": "Repo archived on GitHub" if info["archived"] == "github" else "Archived in Plugin Lab"}]
+        if info["enabled"]:
+            issue("info", "archived-enabled", "Still enabled in the shell")
+
     rank = {"error": 0, "warn": 1, "info": 2}
     issues.sort(key=lambda i: rank[i["level"]])
     info["issues"] = issues
-    info["health"] = issues[0]["level"] if issues else "ok"
+    info["health"] = "ok" if info["archived"] else (issues[0]["level"] if issues else "ok")
     return info
 
 
@@ -651,6 +685,8 @@ def main(argv):
     cmd, rest = argv[0], argv[1:]
     if cmd == "status":
         out = status(fetch="--fetch" in rest)
+    elif cmd in ("archive", "unarchive") and rest:
+        out = set_archived(rest[0], cmd == "archive")
     elif cmd == "seen" and rest:
         out = mark_seen(rest[0])
     elif cmd == "test" and rest:

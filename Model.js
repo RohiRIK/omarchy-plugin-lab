@@ -2,7 +2,7 @@
 // this file in node.
 
 // The pip track: needs-fixes sits with submitted, update with listed.
-var STAGE_STEP = { local: 1, dev: 2, pushed: 3, submitted: 4, "needs-fixes": 4, listed: 5, update: 5, installed: 0 }
+var STAGE_STEP = { local: 1, dev: 2, pushed: 3, submitted: 4, "needs-fixes": 4, listed: 5, update: 5, installed: 0, archived: 0 }
 
 var STAGE_LABELS = {
   local: "Local",
@@ -12,7 +12,8 @@ var STAGE_LABELS = {
   "needs-fixes": "Needs fixes",
   listed: "Listed",
   update: "Update pending",
-  installed: "Installed"
+  installed: "Installed",
+  archived: "Archived"
 }
 
 var HEALTH_RANK = { error: 0, warn: 1, info: 2, ok: 3 }
@@ -31,7 +32,8 @@ var FILTERS = [
   { key: "mine", label: "Mine" },
   { key: "review", label: "In review" },
   { key: "listed", label: "Listed" },
-  { key: "others", label: "Others" }
+  { key: "others", label: "Others" },
+  { key: "archived", label: "Archived" }
 ]
 
 function stageLabel(stage) {
@@ -78,7 +80,9 @@ function sortPlugins(plugins, key) {
   })
 }
 
+// Archived plugins only show under their own filter.
 function matchesFilter(p, key) {
+  if ((p.stage === "archived") !== (key === "archived")) return false
   if (key === "attention") return p.health === "error" || p.health === "warn" || unseen(p) > 0
   if (key === "mine") return !!p.mine
   if (key === "review") return p.stage === "submitted" || p.stage === "needs-fixes"
@@ -118,8 +122,9 @@ function sortLabel(key) {
 }
 
 function summarize(plugins) {
-  var s = { mine: 0, installed: 0, errors: 0, warnings: 0, unseen: 0, listed: 0, stars: 0, forks: 0 }
+  var s = { mine: 0, installed: 0, errors: 0, warnings: 0, unseen: 0, listed: 0, stars: 0, forks: 0, archived: 0 }
   ;(plugins || []).forEach(function (p) {
+    if (p.stage === "archived") { s.archived++; return }
     if (p.mine) s.mine++
     else s.installed++
     if (p.health === "error") s.errors++
@@ -189,6 +194,19 @@ function statsLine(plugin) {
   return "★ " + (plugin.stars || 0) + "  ⑂ " + (plugin.forks || 0) + "  󰈈 " + (plugin.watchers || 0)
 }
 
+function isArchived(plugin) {
+  return !!plugin && plugin.stage === "archived"
+}
+
+// Only an archive made here can be undone here; a GitHub archive is undone on GitHub.
+function canUnarchive(plugin) {
+  return isArchived(plugin) && plugin.archived === "here"
+}
+
+function canArchive(plugin) {
+  return !!plugin && !!plugin.mine && !isArchived(plugin)
+}
+
 function repoUrl(plugin) {
   return plugin && plugin.repo ? "https://github.com/" + plugin.repo : ""
 }
@@ -213,6 +231,7 @@ if (typeof module !== "undefined") {
     summarize: summarize, summaryLine: summaryLine, badge: badge,
     relativeTime: relativeTime, ciLabel: ciLabel, testsLabel: testsLabel,
     subtitle: subtitle, statsLine: statsLine, repoUrl: repoUrl,
-    marketplaceUrl: marketplaceUrl, canFix: canFix
+    marketplaceUrl: marketplaceUrl, canFix: canFix,
+    isArchived: isArchived, canArchive: canArchive, canUnarchive: canUnarchive
   }
 }

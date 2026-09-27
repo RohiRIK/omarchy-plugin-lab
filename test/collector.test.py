@@ -43,12 +43,13 @@ class CollectorTests(unittest.TestCase):
         cls.stub("gh", f"""
             case "$*" in
               "issue list"*) cat {cls.fixtures}/issues.json ;;
+              "repo view me/me.gone"*) echo '{{"visibility":"PUBLIC","isArchived":true}}' ;;
               *registry.json*) cat {cls.fixtures}/registry.json ;;
               *) exit 1 ;;
             esac
         """)
         cls.env = dict(os.environ, PATH=f"{cls.bin}:{os.environ['PATH']}",
-                       PLUGIN_LAB_PLUGINS_DIR=str(cls.plugins), PLUGIN_LAB_OWNERS="me", PLUGIN_LAB_CACHE_DIR=str(cls.cache),
+                       PLUGIN_LAB_PLUGINS_DIR=str(cls.plugins), PLUGIN_LAB_OWNERS="me", PLUGIN_LAB_CONFIG_DIR=str(base / "config"), PLUGIN_LAB_CACHE_DIR=str(cls.cache),
                        GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t", GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t")
         os.environ.update({k: cls.env[k] for k in ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL",
                                                     "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL")})
@@ -73,7 +74,7 @@ class CollectorTests(unittest.TestCase):
         cls.make("me.failing", remote=True, tests="echo boom; exit 3")
         cls.make("me.broken", git=False, extra={"note": "BROKEN"})
         cls.make("them.widget", git=False, author="Someone")
-        for pid in ("me.submitted", "me.reviewed", "me.listed", "me.verifying", "me.stale"):
+        for pid in ("me.submitted", "me.reviewed", "me.listed", "me.verifying", "me.stale", "me.gone", "me.retired"):
             cls.make(pid, remote=True)
         # a plugin you work on in ~/Work but never installed
         cls.make("me.workonly", remote=True, root=cls.work)
@@ -164,7 +165,26 @@ class CollectorTests(unittest.TestCase):
             "me.broken": "local", "them.widget": "installed",
             "me.submitted": "submitted", "me.reviewed": "needs-fixes", "me.listed": "listed",
             "me.verifying": "update", "me.stale": "update", "me.workonly": "pushed", "me.split": "pushed",
+            "me.gone": "archived", "me.retired": "pushed",
         })
+
+    def test_repo_archived_on_github_stops_raising_issues(self):
+        p = self.status()["me.gone"]
+        self.assertEqual((p["stage"], p["archived"], p["health"]), ("archived", "github", "ok"))
+        self.assertEqual(self.codes(p), {"archived"})
+
+    def test_archive_here_is_reversible(self):
+        rc, _ = self.collect("archive", "me.retired")
+        self.assertEqual(rc, 0)
+        p = self.status()["me.retired"]
+        self.assertEqual((p["stage"], p["archived"], p["health"]), ("archived", "here", "ok"))
+        self.assertNotIn("no-tests", self.codes(p))
+        self.collect("unarchive", "me.retired")
+        self.assertEqual(self.status()["me.retired"]["stage"], "pushed")
+
+    def test_archiving_an_unknown_plugin_fails(self):
+        rc, r = self.collect("archive", "nope")
+        self.assertEqual(rc, 1)
 
     def test_needs_fixes_is_an_error_and_the_review_reaches_the_prompt(self):
         p = self.status()["me.reviewed"]
