@@ -218,7 +218,12 @@ function marketplaceUrl(plugin) {
 
 // Fixing makes sense when there is something to fix and the plugin is yours.
 function canFix(plugin) {
-  return !!plugin && !!plugin.mine && (plugin.health === "error" || plugin.health === "warn")
+  return !!plugin && !!plugin.mine && !isArchived(plugin) && (plugin.health === "error" || plugin.health === "warn")
+}
+
+// How many plugins "Fix all" would hand the agent.
+function fixableCount(plugins) {
+  return (plugins || []).filter(canFix).length
 }
 
 if (typeof module !== "undefined") {
@@ -231,7 +236,7 @@ if (typeof module !== "undefined") {
     summarize: summarize, summaryLine: summaryLine, badge: badge,
     relativeTime: relativeTime, ciLabel: ciLabel, testsLabel: testsLabel,
     subtitle: subtitle, statsLine: statsLine, repoUrl: repoUrl,
-    marketplaceUrl: marketplaceUrl, canFix: canFix,
+    marketplaceUrl: marketplaceUrl, canFix: canFix, fixableCount: fixableCount,
     isArchived: isArchived, canArchive: canArchive, canUnarchive: canUnarchive
   }
 }

@@ -7,6 +7,8 @@ Subcommands (all print JSON on stdout):
   test <id>          run the plugin's own test suite, cache the result
   prompt <id>        the prompt `fix` would hand the agent
   fix <id>           open the default agent in the plugin's working copy
+  fix-all            one agent session for every plugin that needs work
+  prompt-all         the prompt `fix-all` would hand the agent
   seen <id>          mark the plugin's comments as read
   archive <id>       stop tracking a plugin you no longer need (reversible)
   unarchive <id>     track it again
@@ -500,7 +502,13 @@ def inspect(pid, where, owners, enabled, fetch=False, market=None):
     # -- issues ---------------------------------------------------------------
     if info["mine"]:
         if stage == "needs-fixes":
-            issue("error", "review", f"Marketplace reviewers asked for fixes (#{mk['issue']['number']})")
+            thread = "marketplace #" + str(mk["issue"]["number"])
+            last_mine = max((c["at"] for c in mk["reviews"] if c["where"] == thread and c["by"].lower() in owners), default=0)
+            last_theirs = max((c["at"] for c in mk["reviews"] if c["where"] == thread and c["by"].lower() not in owners), default=0)
+            if last_mine > last_theirs:
+                issue("info", "re-review", f"You replied with fixes; waiting for the reviewers to look again (#{mk['issue']['number']})")
+            else:
+                issue("error", "review", f"Marketplace reviewers asked for fixes (#{mk['issue']['number']})")
         elif stage == "submitted":
             issue("info", "submitted", f"Marketplace submission #{mk['issue']['number']} is waiting for a maintainer")
         elif stage == "update" and mk.get("verifyPending"):
@@ -639,21 +647,48 @@ def run_tests(pid):
     return result
 
 
-def fix_prompt(info):
-    lines = [
-        f"You're working on the Omarchy shell plugin {info['id']} ({info['name']} {info['version']}) in {info['path']}.",
-        f"Its lifecycle stage is {info['stage']}.",
-        "Plugin Lab flagged these issues:",
-    ]
-    lines += [f"- [{i['level']}] {i['text']}" for i in info["issues"]] or ["- (none flagged; do a general health check)"]
+# How to fix each kind of issue. The agent gets these next to the issue itself.
+FIX_HINTS = {
+    "ci": "Read the failing run with `gh run view <run> --log-failed`; reproduce locally before changing code.",
+    "tests": "Re-run the suite, read the log, fix the code (not the test) unless the test is wrong.",
+    "no-tests": "Add a `test/run` suite like the one in rohi.passwords: node for Model.js, python for backends, a manifest test.",
+    "no-ci": "Add .github/workflows/test.yml that runs the test suite (stub `omarchy` and `gh`; the runner has neither).",
+    "review": "Address every reviewer point in code, add a test that fails before the fix, then draft a reply for me.",
+    "stale-install": "Update the bar copy with `omarchy plugin update {id} --yes` (a fast-forward from GitHub). "
+                     "First check the bar copy has no uncommitted changes and the working copy is pushed; otherwise ask me.",
+    "unverified": "Draft a marketplace “Verify and publish a newer upstream commit” request for the pushed HEAD; do not file it.",
+    "dirty": "Look at the uncommitted changes: commit them if they are finished, otherwise tell me what they are.",
+    "ahead": "Unpushed commits: tell me what they are; do not push.",
+    "behind": "Pull with `git pull --ff-only` if the working tree is clean.",
+    "open-issues": "Read the open issues and propose fixes; fix the ones that are clearly bugs.",
+    "open-prs": "Review the open pull requests and summarize them for me; do not merge.",
+    "manifest": "Fix the manifest until `omarchy plugin validate` passes.",
+}
+
+RULES = [
+    "Never edit /usr/share/omarchy. After changing code the bar runs, run `omarchy restart shell` to load it.",
+    "Commit fixes locally, but ask me before pushing, tagging, commenting on GitHub, filing marketplace issues or submitting anything.",
+]
+
+
+def plugin_block(info):
+    lines = [f"{info['name']} ({info['id']} {info['version']}), stage {info['stage']}, in {info['path']}"
+             + (f"; the bar runs {info['installedPath']}" if info.get("installedPath") and info["installedPath"] != info["path"] else "")]
+    for i in info["issues"]:
+        lines.append(f"- [{i['level']}] {i['text']}")
+        hint = FIX_HINTS.get(i["code"])
+        if hint:
+            lines.append("    fix: " + hint.format(id=info["id"]))
+    if not info["issues"]:
+        lines.append("- (none flagged; do a general health check)")
     ci = info.get("ci") or {}
     if ci.get("conclusion") == "failure" and ci.get("url"):
-        lines.append(f"Failing CI run: {ci['url']} (read it with `gh run view --log-failed`).")
+        lines.append(f"Failing CI run: {ci['url']}")
     mk = info.get("marketplace") or {}
     if mk.get("issue"):
         lines.append(f"Marketplace issue: {mk['issue']['url']} (labels: {', '.join(mk['issue']['labels'])}).")
     if mk.get("state") == "needs-fixes":
-        lines.append("Reviewer comments, oldest first (read the full thread with `gh issue view --comments`):")
+        lines.append("Reviewer comments, oldest first (full thread: `gh issue view --comments`):")
         for c in sorted(mk.get("reviews", []), key=lambda c: c["at"]):
             lines.append(f"--- {c['by']}:\n{c['body']}")
     for i in (info.get("feedback") or {}).get("items", []):
@@ -661,21 +696,65 @@ def fix_prompt(info):
     t = info.get("tests") or {}
     if t and not t.get("ok"):
         lines.append(f"Last local test log: {t.get('log')}")
-    lines += [
-        "Investigate the errors and warnings first, fix what is broken, and run the plugin's test suite to confirm.",
-        "Plugin code hot-reloads from ~/.config/omarchy/plugins. Never edit /usr/share/omarchy.",
-        "Commit fixes locally, but ask me before pushing, tagging, commenting on GitHub or submitting anything.",
-    ]
     return "\n".join(lines)
+
+
+def fix_prompt(info):
+    return "\n".join([
+        "You're fixing one of my Omarchy shell plugins. Plugin Lab flagged it:",
+        "",
+        plugin_block(info),
+        "",
+        "Fix the errors first, then the warnings, and run the plugin's test suite to confirm.",
+        *RULES,
+    ])
+
+
+def needs_fixing(info):
+    return info["mine"] and info["stage"] != "archived" and info["health"] in ("error", "warn")
+
+
+def fix_all_prompt(plugins):
+    todo = sorted((p for p in plugins if needs_fixing(p)),
+                  key=lambda p: (0 if p["health"] == "error" else 1, p["name"]))
+    if not todo:
+        return ""
+    blocks = [f"{n}. " + plugin_block(p) for n, p in enumerate(todo, 1)]
+    return "\n".join([
+        f"You're maintaining my Omarchy shell plugins. Plugin Lab flagged {len(todo)} that need work, "
+        "broken ones first. Work through them one at a time, in this order:",
+        "",
+        "\n\n".join(blocks),
+        "",
+        "For each plugin: fix what you can, run its test suite, and commit in that plugin's own repo. "
+        "Look for the same problem across plugins and fix it the same way everywhere "
+        "(shared test layout, CI workflow, README sections).",
+        *RULES,
+        "Finish with a short table: plugin, what you fixed, what is waiting for my approval.",
+    ])
+
+
+def launch_agent(prompt, cwd):
+    subprocess.Popen(["omarchy-agent-prompt", prompt], cwd=cwd,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
 
 
 def launch_fix(pid):
     info = inspect_one(pid)
     if not info:
         return {"error": f"No plugin {pid}"}
-    subprocess.Popen(["omarchy-agent-prompt", fix_prompt(info)], cwd=info["path"],
-                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    launch_agent(fix_prompt(info), info["path"])
     return {"launched": pid}
+
+
+def launch_fix_all():
+    plugins = status()["plugins"]
+    prompt = fix_all_prompt(plugins)
+    if not prompt:
+        return {"error": "Nothing needs fixing"}
+    cwd = next((str(d) for d in WORK_DIRS if d.is_dir()), str(HOME))
+    launch_agent(prompt, cwd)
+    return {"launched": [p["id"] for p in plugins if needs_fixing(p)]}
 
 
 def main(argv):
@@ -685,6 +764,10 @@ def main(argv):
     cmd, rest = argv[0], argv[1:]
     if cmd == "status":
         out = status(fetch="--fetch" in rest)
+    elif cmd == "fix-all":
+        out = launch_fix_all()
+    elif cmd == "prompt-all":
+        out = {"prompt": fix_all_prompt(status()["plugins"])}
     elif cmd in ("archive", "unarchive") and rest:
         out = set_archived(rest[0], cmd == "archive")
     elif cmd == "seen" and rest:

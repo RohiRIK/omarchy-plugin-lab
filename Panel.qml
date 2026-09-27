@@ -83,6 +83,11 @@ Panel {
     root.close()
   }
 
+  function fixAll() {
+    Quickshell.execDetached(["python3", root.collector, "fix-all"])
+    root.close()
+  }
+
   function toggleExpanded(plugin) {
     root.expandedId = root.expandedId === plugin.id ? "" : plugin.id
     if (root.expandedId && Model.unseen(plugin) > 0)
@@ -229,6 +234,16 @@ Panel {
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
             }
+          }
+
+          Button {
+            readonly property int count: Model.fixableCount(root.plugins)
+            visible: count > 0
+            text: "󱚣  Fix all " + count
+            tooltipText: "One agent session for every plugin that needs work, broken ones first. It asks before pushing or submitting."
+            bordered: true
+            fontSize: Style.font.caption
+            onClicked: root.fixAll()
           }
 
           Button {

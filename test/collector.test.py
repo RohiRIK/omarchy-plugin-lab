@@ -211,11 +211,28 @@ class CollectorTests(unittest.TestCase):
         (self.fixtures / "issues.json").write_text(json.dumps(issues))
         (self.cache / "marketplace.json").unlink()
         try:
-            self.assertEqual(self.status()["me.reviewed"]["unseen"], 0)
+            p = self.status()["me.reviewed"]
+            self.assertEqual(p["unseen"], 0)
+            # your reply is the latest word: waiting for re-review, not broken
+            self.assertEqual(p["stage"], "needs-fixes")
+            self.assertNotEqual(p["health"], "error")
+            self.assertIn("re-review", self.codes(p))
+            self.assertNotIn("review", self.codes(p))
         finally:
             issues[1]["comments"].pop()
             (self.fixtures / "issues.json").write_text(json.dumps(issues))
             (self.cache / "marketplace.json").unlink()
+
+    def test_fix_all_covers_every_plugin_that_needs_work_errors_first(self):
+        rc, r = self.collect("prompt-all")
+        self.assertEqual(rc, 0)
+        prompt = r["prompt"]
+        self.assertIn("me.reviewed", prompt)
+        self.assertIn("omarchy plugin update me.split --yes", prompt)
+        self.assertNotIn("me.gone", prompt)
+        self.assertNotIn("them.widget", prompt)
+        self.assertLess(prompt.index("me.broken"), prompt.index("me.split"))
+        self.assertIn("ask me before pushing", prompt)
 
     def test_work_dir_plugins_are_found_even_when_not_installed(self):
         p = self.status()["me.workonly"]

@@ -27,6 +27,12 @@ The bar icon shows a count of broken plugins plus unread comments.
   plugin's working copy with every flagged issue, the failing CI run and any
   marketplace review comments. The agent is told to commit locally and ask
   before pushing, tagging, commenting or submitting.
+- **Fix all** (panel header) opens one agent session for every plugin that
+  needs work, broken ones first, with a concrete fix for each issue (for
+  example `omarchy plugin update <id> --yes` when your bar runs an older copy
+  than your working copy). Same rules: commit locally, ask before anything
+  leaves your machine, and end with a table of what was fixed and what is
+  waiting for you.
 - **Run tests** runs `test/run` or `tests/*test*.sh`; results are cached and
   marked stale when the tree changes.
 - Links to GitHub, the CI run, the marketplace issue, the test log and the folder.

@@ -63,6 +63,11 @@ test("archive and unarchive buttons", function () {
   assert.ok(!Model.canUnarchive(gone))
 })
 
+test("fix all counts your broken or warned, unarchived plugins", function () {
+  var warnedButArchived = { id: "f", mine: true, health: "warn", stage: "archived", archived: "here" }
+  assert.strictEqual(Model.fixableCount([mineBroken, mineOk, theirs, gone, warnedButArchived]), 1)
+})
+
 test("stats line only for your GitHub plugins", function () {
   assert.strictEqual(Model.statsLine(mineBroken), "★ 3  ⑂ 1  󰈈 0")
   assert.strictEqual(Model.statsLine(theirs), "")
