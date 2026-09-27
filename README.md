@@ -1,0 +1,61 @@
+# Plugin Lab
+
+An Omarchy bar widget that tracks the Omarchy shell plugins you build, from
+first commit to marketplace listing, and tells you when one needs you.
+
+## What it shows
+
+For every plugin in `~/.config/omarchy/plugins` and every plugin working copy
+under `~/Work`:
+
+- **Lifecycle stage**: Local → In dev → On GitHub → In review / Needs fixes →
+  Listed / Update pending, read from git, GitHub and the
+  [Omarchy plugin marketplace](https://github.com/omacom/omarchy-plugin-marketplace)
+  (your submission and verification issues, and `registry.json`).
+- **Health**: CI on GitHub, local test results, manifest validation,
+  uncommitted or unpushed work, a bar running older code than your working copy.
+- **Feedback**: stars, forks, watchers, open issues and PRs, comments from
+  other people on your repo and marketplace threads, and mentions in
+  `omacom/omarchy`. A comment counts as read once you open the plugin here or
+  reply after it.
+
+The bar icon shows a count of broken plugins plus unread comments.
+
+## Actions
+
+- **Fix with agent** opens your default agent (`omarchy agent prompt`) in the
+  plugin's working copy with every flagged issue, the failing CI run and any
+  marketplace review comments. The agent is told to commit locally and ask
+  before pushing, tagging, commenting or submitting.
+- **Run tests** runs `test/run` or `tests/*test*.sh`; results are cached and
+  marked stale when the tree changes.
+- Links to GitHub, the CI run, the marketplace issue, the test log and the folder.
+
+Filter (all, needs attention, mine, in review, listed, others), search, and
+sort by health, stage, activity, stars or name.
+
+## Install
+
+```bash
+omarchy plugin add https://github.com/RohiRIK/omarchy-plugin-lab --enable
+```
+
+Needs `git`, `python3` and an authenticated `gh`. GitHub data is cached
+(CI 5 min, feedback 15 min, marketplace 10 min / 1 h); right-click the bar
+icon or press **Check GitHub** to fetch now.
+
+Environment overrides: `PLUGIN_LAB_WORK_DIRS` (colon-separated, default
+`~/Work`), `PLUGIN_LAB_OWNERS`, `PLUGIN_LAB_MARKETPLACE`, `PLUGIN_LAB_UPSTREAM`.
+
+## Remove
+
+```bash
+omarchy plugin remove rohirik.plugin-lab
+rm -rf ~/.cache/omarchy-plugin-lab
+```
+
+## Tests
+
+```bash
+bash test/run
+```

@@ -1,0 +1,33 @@
+#!/bin/bash
+#
+# Aggregated test runner for the Plugin Lab plugin. Continues past failures
+# so every file gets its coverage.
+
+set -uo pipefail
+
+ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+TEST_DIR="$ROOT/test"
+
+failed=0
+
+run() {
+  local label="$1"
+  shift
+  printf '==> %s\n' "$label"
+  if ! "$@"; then
+    failed=1
+  fi
+}
+
+run "Model.js unit tests (node)" node "$TEST_DIR/model.test.js"
+run "collector.py against throwaway repos" python3 "$TEST_DIR/collector.test.py"
+if command -v omarchy >/dev/null; then
+  run "Manifest schema" omarchy plugin validate "$ROOT"
+fi
+
+if [[ $failed -ne 0 ]]; then
+  printf '\nSome tests failed.\n' >&2
+  exit 1
+fi
+
+printf '\nAll tests passed.\n'

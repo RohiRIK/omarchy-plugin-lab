@@ -1,0 +1,70 @@
+{
+  "schemaVersion": 1,
+  "id": "rohirik.plugin-lab",
+  "name": "Plugin Lab",
+  "version": "0.1.0",
+  "author": "RohiRIK",
+  "license": "MIT",
+  "description": "Lifecycle, health and GitHub feedback for the Omarchy shell plugins you build, with one-click fixes by your default agent.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "activation": "on-demand",
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Plugin Lab",
+    "description": "Lifecycle, health and GitHub feedback for the Omarchy shell plugins you build.",
+    "category": "System",
+    "defaultSection": "right",
+    "allowMultiple": false,
+    "defaults": {
+      "refreshIntervalSec": 300,
+      "showInstalled": true,
+      "sortBy": "health",
+      "filter": "all"
+    },
+    "schema": [
+      {
+        "key": "refreshIntervalSec",
+        "type": "integer",
+        "label": "Refresh every (seconds)",
+        "min": 60,
+        "max": 3600,
+        "step": 60,
+        "defaultValue": 300
+      },
+      {
+        "key": "showInstalled",
+        "type": "boolean",
+        "label": "Show plugins by others"
+      },
+      {
+        "key": "sortBy",
+        "type": "enum",
+        "label": "Sort by",
+        "options": [
+          "health",
+          "stage",
+          "activity",
+          "stars",
+          "name"
+        ]
+      },
+      {
+        "key": "filter",
+        "type": "enum",
+        "label": "Default filter",
+        "options": [
+          "all",
+          "attention",
+          "mine",
+          "review",
+          "listed",
+          "others"
+        ]
+      }
+    ]
+  }
+}
