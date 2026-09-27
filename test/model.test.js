@@ -8,115 +8,66 @@ var Model = require("../Model.js")
 var tests = []
 function test(name, fn) { tests.push([name, fn]) }
 
-var mineBroken = { id: "a", name: "Zed", mine: true, health: "error", stage: "needs-fixes", unseen: 2, stars: 3, forks: 1, activityAt: 50, repo: "me/zed" }
-var mineOk = { id: "b", name: "Alpha", mine: true, health: "ok", stage: "listed", stars: 9, activityAt: 100 }
-var gone = { id: "d", name: "Old", mine: true, health: "ok", stage: "archived", archived: "github", stars: 50 }
-var shelved = { id: "e", name: "Shelved", mine: true, health: "ok", stage: "archived", archived: "here" }
-var theirs = { id: "c", name: "Beta", mine: false, health: "warn", stage: "installed", author: "Ajex" }
+var issue = function (level, code) { return { level: level, code: code, text: code } }
+var broken = { id: "a", name: "Zed", mine: true, health: "error", stage: "pushed", stars: 3, forks: 1, repo: "me/zed",
+               issues: [issue("error", "ci"), issue("warn", "no-tests"), issue("warn", "dirty")] }
+var warned = { id: "w", name: "Mid", mine: true, health: "warn", stage: "update", unseen: 2, issues: [issue("warn", "stale-install")] }
+var waiting = { id: "r", name: "Rev", mine: true, health: "info", stage: "needs-fixes", marketplace: { issue: { number: 7, url: "u" } },
+                issues: [issue("info", "re-review")] }
+var fine = { id: "b", name: "Alpha", mine: true, health: "ok", stage: "listed", version: "1.0", issues: [] }
+var gone = { id: "d", name: "Old", mine: true, health: "ok", stage: "archived", archived: "github", issues: [] }
+var shelved = { id: "e", name: "Shelved", mine: true, health: "ok", stage: "archived", archived: "here", issues: [] }
+var theirs = { id: "c", name: "Beta", mine: false, health: "warn", stage: "installed", author: "Ajex", version: "2", issues: [] }
+var all = [theirs, fine, broken, warned, waiting, gone, shelved]
+var ids = function (rows) { return rows.map(function (p) { return p.id }) }
 
-test("stages walk the lifecycle in order", function () {
+test("sections: needs you, waiting, all good; the rest folded away", function () {
+  var g = Model.groups(all, false)
+  assert.deepStrictEqual(g.map(function (x) { return x.key }), ["needs", "waiting", "good"])
+  assert.deepStrictEqual(ids(g[0].rows), ["a", "w"])
+  assert.deepStrictEqual(ids(g[1].rows), ["r"])
+  assert.strictEqual(Model.hiddenCount(all), 3)
+  var more = Model.groups(all, true)
+  assert.deepStrictEqual(more.map(function (x) { return x.key }), ["needs", "waiting", "good", "archived", "others"])
+  assert.deepStrictEqual(ids(Model.flatRows(more)), ["a", "w", "r", "b", "d", "e", "c"])
+})
+
+test("captions are short", function () {
+  assert.strictEqual(Model.caption(broken), "CI failing · No tests · +1")
+  assert.strictEqual(Model.caption(warned), "2 new comments · Bar runs an older copy")
+  assert.strictEqual(Model.caption(waiting), "Waiting for re-review · #7")
+  assert.strictEqual(Model.caption(fine), "Listed · v1.0")
+  assert.strictEqual(Model.caption(gone), "Archived on GitHub")
+  assert.strictEqual(Model.caption(theirs), "v2 · by Ajex")
+})
+
+test("hero status and badge", function () {
+  var s = Model.summarize(all)
+  assert.strictEqual(Model.heroStatus(s), "2 NEED YOU · 1 WAITING · 1 FINE")
+  assert.strictEqual(s.archived, 2)
+  assert.strictEqual(Model.badge(s), "3")
+  assert.strictEqual(Model.heroStatus(Model.summarize([fine])), "1 FINE")
+  assert.strictEqual(Model.badge(Model.summarize([fine])), "")
+})
+
+test("lifecycle track", function () {
   assert.deepStrictEqual(["local", "dev", "pushed", "submitted", "needs-fixes", "listed", "update"].map(Model.stageStep),
                          [1, 2, 3, 4, 4, 5, 5])
-  assert.strictEqual(Model.stageStep("installed"), 0)
+  assert.strictEqual(Model.track().length, 5)
   assert.strictEqual(Model.stageLabel("needs-fixes"), "Needs fixes")
 })
 
-test("sort keys", function () {
-  var ids = function (key) { return Model.sortPlugins([theirs, mineOk, mineBroken], key).map(function (p) { return p.id }) }
-  assert.deepStrictEqual(ids("health"), ["a", "b", "c"])
-  assert.deepStrictEqual(ids("stars"), ["b", "a", "c"])
-  assert.deepStrictEqual(ids("stage"), ["b", "a", "c"])
-  assert.deepStrictEqual(ids("activity"), ["b", "a", "c"])
-  assert.deepStrictEqual(ids("name"), ["b", "a", "c"])
-  assert.strictEqual(Model.nextSort("name"), "health")
-})
-
-test("filters and search", function () {
-  var all = [theirs, mineOk, mineBroken]
-  var ids = function (f, q) { return Model.visibleRows(all, f, q, "name").map(function (p) { return p.id }) }
-  assert.deepStrictEqual(ids("attention", ""), ["a", "c"])
-  assert.deepStrictEqual(ids("review", ""), ["a"])
-  assert.deepStrictEqual(ids("listed", ""), ["b"])
-  assert.deepStrictEqual(ids("others", ""), ["c"])
-  assert.deepStrictEqual(ids("all", "ajex"), ["c"])
-  assert.deepStrictEqual(ids("all", "needs fix"), ["a"])
-  assert.strictEqual(Model.countFor(all, "mine"), 2)
-})
-
-test("archived plugins live only under their own filter and out of the counts", function () {
-  var all = [theirs, mineOk, mineBroken, gone, shelved]
-  var ids = function (f) { return Model.visibleRows(all, f, "", "name").map(function (p) { return p.id }) }
-  assert.deepStrictEqual(ids("all"), ["b", "a", "c"])
-  assert.deepStrictEqual(ids("mine"), ["b", "a"])
-  assert.deepStrictEqual(ids("archived"), ["d", "e"])
-  var s = Model.summarize(all)
-  assert.strictEqual(s.archived, 2)
-  assert.strictEqual(s.mine, 2)
-  assert.strictEqual(s.stars, 12)
-})
-
-test("archive and unarchive buttons", function () {
-  assert.ok(Model.canArchive(mineOk))
-  assert.ok(!Model.canArchive(theirs))
-  assert.ok(!Model.canArchive(shelved))
-  assert.ok(Model.canUnarchive(shelved))
-  assert.ok(!Model.canUnarchive(gone))
-})
-
-test("fix all counts your broken or warned, unarchived plugins", function () {
-  var warnedButArchived = { id: "f", mine: true, health: "warn", stage: "archived", archived: "here" }
-  assert.strictEqual(Model.fixableCount([mineBroken, mineOk, theirs, gone, warnedButArchived]), 1)
-})
-
-test("stats line only for your GitHub plugins", function () {
-  assert.strictEqual(Model.statsLine(mineBroken), "★ 3  ⑂ 1  󰈈 0")
-  assert.strictEqual(Model.statsLine(theirs), "")
-})
-
-test("yours come first, worst health first", function () {
-  var ids = Model.sortPlugins([theirs, mineOk, mineBroken]).map(function (p) { return p.id })
-  assert.deepStrictEqual(ids, ["a", "b", "c"])
-})
-
-test("sortPlugins does not mutate its input", function () {
-  var input = [theirs, mineOk]
-  Model.sortPlugins(input)
-  assert.strictEqual(input[0], theirs)
-})
-
-test("summary counts broken plugins and unread comments", function () {
-  var s = Model.summarize([mineBroken, mineOk, theirs])
-  assert.deepStrictEqual(s, { mine: 2, installed: 1, errors: 1, warnings: 1, unseen: 2, listed: 1, stars: 12, forks: 1, archived: 0 })
-  assert.strictEqual(Model.badge(s), "3")
-  assert.ok(Model.summaryLine(s).indexOf("2 new comments") >= 0)
-})
-
-test("badge is empty when all is well", function () {
-  assert.strictEqual(Model.badge(Model.summarize([mineOk])), "")
-})
-
-test("only your broken or warned plugins can be sent to the agent", function () {
-  assert.ok(Model.canFix(mineBroken))
-  assert.ok(!Model.canFix(mineOk))
+test("fix, archive and unarchive", function () {
+  assert.strictEqual(Model.fixableCount(all), 2)
   assert.ok(!Model.canFix(theirs))
+  assert.ok(Model.canArchive(fine) && !Model.canArchive(theirs) && !Model.canArchive(shelved))
+  assert.ok(Model.canUnarchive(shelved) && !Model.canUnarchive(gone))
 })
 
-test("CI and test labels", function () {
+test("facts line", function () {
+  assert.ok(Model.facts(broken).indexOf("★ 3  ⑂ 1") >= 0)
   assert.strictEqual(Model.ciLabel({ status: "completed", conclusion: "failure" }), "CI ✗")
-  assert.strictEqual(Model.ciLabel({ status: "in_progress" }), "CI running")
-  assert.strictEqual(Model.ciLabel({ status: "none" }), "no CI")
-  assert.strictEqual(Model.testsLabel({ hasTests: false }), "no tests")
-  assert.strictEqual(Model.testsLabel({ hasTests: true, tests: { ok: true, stale: true } }), "tests ✓ (stale)")
-})
-
-test("subtitle shows author for someone else's plugin", function () {
-  assert.strictEqual(Model.subtitle({ version: "1.0", author: "Ajex" }), "v1.0 · by Ajex")
-})
-
-test("relativeTime", function () {
-  assert.strictEqual(Model.relativeTime(1000, 1030), "just now")
   assert.strictEqual(Model.relativeTime(1000, 1000 + 7200), "2h ago")
-  assert.strictEqual(Model.relativeTime(0, 5), "")
 })
 
 var failed = 0

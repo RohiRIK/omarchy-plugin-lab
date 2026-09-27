@@ -1,10 +1,12 @@
-// rohirik.plugin-lab -- the lifecycle and health of every shell plugin in
-// ~/.config/omarchy/plugins, from first commit to tagged release, plus what
-// people are saying about them on GitHub and upstream Omarchy.
+// rohirik.plugin-lab -- the lifecycle and health of the Omarchy shell plugins
+// you build, from first commit to marketplace listing, plus what people are
+// saying about them.
 //
-// All the looking happens in collector.py; this file only renders its JSON
+// Two pages, like Omarchy's own panels: a calm list grouped into NEEDS YOU,
+// WAITING and ALL GOOD, and a detail page per plugin that holds everything
+// else. All the looking happens in collector.py; this file renders its JSON
 // and fires its actions. Nothing here pushes, tags or edits a plugin: fixes go
-// to your default agent, which is told to ask before publishing anything.
+// to your default agent, which is told to ask before anything leaves the machine.
 
 import QtQuick
 import QtQuick.Controls
@@ -25,37 +27,40 @@ Panel {
   implicitHeight: button.implicitHeight
 
   readonly property string collector: Qt.resolvedUrl("collector.py").toString().replace("file://", "")
-
-  // ---- settings -----------------------------------------------------------
   readonly property int refreshIntervalSec: Math.max(60, Number(setting("refreshIntervalSec", 300)))
-  readonly property bool showInstalled: setting("showInstalled", true) !== false
 
   // ---- data ---------------------------------------------------------------
   property var plugins: []
-  property int generatedAt: 0
   property string loadError: ""
   property bool loading: false
   property string testingId: ""
-  property string expandedId: ""
-  property string sortKey: String(setting("sortBy", "health"))
-  property string filterKey: String(setting("filter", "all"))
-  property string searchText: ""
 
-  readonly property var shown: root.plugins.filter(function (p) { return p.mine || root.showInstalled })
-  readonly property var rows: Model.visibleRows(root.shown, root.filterKey, root.searchText, root.sortKey)
+  // ---- ui state -----------------------------------------------------------
+  property bool showMore: false
+  property int cursor: 0
+  property string selectedId: ""
+
+  readonly property var groups: Model.groups(root.plugins, root.showMore)
+  readonly property var flat: Model.flatRows(root.groups)
   readonly property var summary: Model.summarize(root.plugins)
+  readonly property int fixable: Model.fixableCount(root.plugins)
+  readonly property var selected: {
+    for (var i = 0; i < root.plugins.length; i++)
+      if (root.plugins[i].id === root.selectedId) return root.plugins[i]
+    return null
+  }
 
   // ---- theme --------------------------------------------------------------
   readonly property color foreground: bar ? bar.foreground : Color.foreground
-  readonly property color dim: Qt.darker(root.foreground, 1.55)
+  readonly property color dim: Qt.darker(root.foreground, 1.5)
   readonly property color accent: Color.accent
   readonly property color urgent: bar ? bar.urgent : Color.urgent
-  readonly property color selectedBackground: Color.menu.selectedBackground
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
 
+  // Only broken is loud; everything else stays in the foreground or dims.
   function healthColor(health) {
     if (health === "error") return root.urgent
-    if (health === "warn") return root.accent
+    if (health === "warn") return root.foreground
     return root.dim
   }
 
@@ -68,6 +73,26 @@ Panel {
     statusProc.command = fetch ? ["python3", root.collector, "status", "--fetch"]
                                : ["python3", root.collector, "status"]
     statusProc.running = true
+  }
+
+  function openDetail(plugin) {
+    if (!plugin)
+      return
+    root.selectedId = plugin.id
+    if (Model.unseen(plugin) > 0)
+      Quickshell.execDetached(["python3", root.collector, "seen", plugin.id])
+  }
+
+  function back() {
+    if (root.selected && Model.unseen(root.selected) > 0)
+      root.refresh(false)
+    root.selectedId = ""
+  }
+
+  function moveCursor(dy) {
+    if (root.selected || root.flat.length === 0)
+      return
+    root.cursor = Math.max(0, Math.min(root.flat.length - 1, root.cursor + dy))
   }
 
   function runTests(plugin) {
@@ -84,18 +109,14 @@ Panel {
   }
 
   function fixAll() {
+    if (root.fixable === 0)
+      return
     Quickshell.execDetached(["python3", root.collector, "fix-all"])
     root.close()
   }
 
-  function toggleExpanded(plugin) {
-    root.expandedId = root.expandedId === plugin.id ? "" : plugin.id
-    if (root.expandedId && Model.unseen(plugin) > 0)
-      Quickshell.execDetached(["python3", root.collector, "seen", plugin.id])
-  }
-
   function setArchived(plugin, archived) {
-    root.expandedId = ""
+    root.selectedId = ""
     archiveProc.command = ["python3", root.collector, archived ? "archive" : "unarchive", plugin.id]
     archiveProc.running = true
   }
@@ -105,23 +126,24 @@ Panel {
       Quickshell.execDetached(["xdg-open", url])
   }
 
-  function openFolder(plugin) {
-    Quickshell.execDetached(["omarchy-launch-editor", plugin.path])
-    root.close()
-  }
-
-  function openLog(plugin) {
-    if (plugin.tests && plugin.tests.log)
-      Quickshell.execDetached(["omarchy-launch-editor", plugin.tests.log])
+  function openPath(path) {
+    if (!path)
+      return
+    Quickshell.execDetached(["omarchy-launch-editor", path])
     root.close()
   }
 
   onOpenedChanged: {
-    if (root.opened)
+    if (root.opened) {
       root.refresh(false)
-    else if (root.plugins.some(function (p) { return p.id === root.expandedId && Model.unseen(p) > 0 }))
-      root.refresh(false)
+    } else {
+      root.selectedId = ""
+      root.showMore = false
+      root.cursor = 0
+    }
   }
+
+  onFlatChanged: if (root.cursor >= root.flat.length) root.cursor = Math.max(0, root.flat.length - 1)
 
   Component.onCompleted: root.refresh(false)
 
@@ -135,9 +157,7 @@ Panel {
       onStreamFinished: {
         root.loading = false
         try {
-          var data = JSON.parse(text)
-          root.plugins = data.plugins || []
-          root.generatedAt = Number(data.generatedAt || 0)
+          root.plugins = JSON.parse(text).plugins || []
           root.loadError = ""
         } catch (e) {
           root.loadError = "Could not read plugin status"
@@ -149,12 +169,9 @@ Panel {
   Process {
     id: testProc
     running: false
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        root.testingId = ""
-        root.refresh(false)
-      }
+    onExited: {
+      root.testingId = ""
+      root.refresh(false)
     }
   }
 
@@ -195,414 +212,515 @@ Panel {
     owner: root
     bar: root.bar
     open: root.opened
-    focusTarget: searchField
-    contentWidth: panel.fittedContentWidth(Style.space(520))
-    contentHeight: panel.fittedContentHeight(layout.implicitHeight, Style.space(680))
+    focusTarget: keyCatcher
+    contentWidth: panel.fittedContentWidth(Style.space(420))
+    contentHeight: panel.fittedContentHeight(column.implicitHeight)
 
     PanelKeyCatcher {
+      id: keyCatcher
       anchors.fill: parent
-      onCloseRequested: root.close()
+      onMoveRequested: function (dx, dy) {
+        if (root.selected && dx < 0) root.back()
+        else root.moveCursor(dy)
+      }
+      onActivateRequested: if (!root.selected) root.openDetail(root.flat[root.cursor])
+      onCloseRequested: root.selected ? root.back() : root.close()
       onTabRequested: function (direction) { root.switchPanel(direction) }
+      onTextKey: function (t) {
+        if (t === "r") root.refresh(true)
+        else if (t === "f") root.selected ? (Model.canFix(root.selected) && root.fix(root.selected)) : root.fixAll()
+        else if (t === "t" && root.selected) root.runTests(root.selected)
+        else if (t === "m" && !root.selected) root.showMore = !root.showMore
+      }
 
-      ColumnLayout {
-        id: layout
+      Column {
+        id: column
         anchors.fill: parent
-        spacing: Style.spacing.sm
+        spacing: Style.space(14)
 
-        RowLayout {
-          Layout.fillWidth: true
-          spacing: Style.spacing.sm
+        // ---------- hero ----------
+        Item {
+          width: parent.width
+          implicitHeight: Math.max(heroIcon.implicitHeight, heroLabels.implicitHeight, heroActions.implicitHeight)
 
-          ColumnLayout {
-            Layout.fillWidth: true
-            spacing: 0
+          PanelActionButton {
+            id: backButton
+            visible: !!root.selected
+            anchors.left: parent.left
+            anchors.verticalCenter: parent.verticalCenter
+            iconText: "󰁍"
+            tooltipText: "Back (Esc)"
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+            onClicked: root.back()
+          }
+
+          Text {
+            id: heroIcon
+            visible: !root.selected
+            textFormat: Text.PlainText
+            anchors.left: parent.left
+            anchors.verticalCenter: parent.verticalCenter
+            text: "󰏗"
+            color: root.foreground
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.display
+          }
+
+          Column {
+            id: heroLabels
+            anchors.left: root.selected ? backButton.right : heroIcon.right
+            anchors.leftMargin: Style.space(14)
+            anchors.right: heroActions.left
+            anchors.rightMargin: Style.space(8)
+            anchors.verticalCenter: parent.verticalCenter
+            spacing: Style.space(2)
+
             Text {
-              text: "Plugin Lab"
+              width: parent.width
+              textFormat: Text.PlainText
+              text: root.selected ? root.selected.name : "Plugin Lab"
               color: root.foreground
               font.family: root.fontFamily
-              font.pixelSize: Style.font.body
+              font.pixelSize: Style.font.title
               font.bold: true
-            }
-            Text {
-              Layout.fillWidth: true
-              textFormat: Text.PlainText
-              text: root.loadError !== "" ? root.loadError
-                  : root.plugins.length === 0 && root.loading ? "Looking at your plugins…"
-                  : Model.summaryLine(root.summary)
-              color: root.loadError !== "" ? root.urgent : root.dim
               elide: Text.ElideRight
+            }
+
+            Text {
+              width: parent.width
+              textFormat: Text.PlainText
+              text: root.loadError !== "" ? root.loadError.toUpperCase()
+                  : root.selected ? Model.stageLabel(root.selected.stage).toUpperCase()
+                  : root.plugins.length === 0 && root.loading ? "LOOKING…"
+                  : Model.heroStatus(root.summary)
+              color: root.loadError !== "" ? root.urgent : Qt.darker(root.foreground, 1.4)
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
+              font.bold: true
+              font.letterSpacing: 1.2
+              elide: Text.ElideRight
             }
           }
 
-          Button {
-            readonly property int count: Model.fixableCount(root.plugins)
-            visible: count > 0
-            text: "󱚣  Fix all " + count
-            tooltipText: "One agent session for every plugin that needs work, broken ones first. It asks before pushing or submitting."
-            bordered: true
-            fontSize: Style.font.caption
-            onClicked: root.fixAll()
-          }
+          Row {
+            id: heroActions
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            spacing: Style.space(4)
 
-          Button {
-            text: root.loading ? "Checking…" : "Check GitHub"
-            tooltipText: "Fetch every repo and refresh (also: right-click the bar icon)"
-            bordered: true
-            fontSize: Style.font.caption
-            enabled: !root.loading
-            onClicked: root.refresh(true)
-          }
-        }
-
-        RowLayout {
-          Layout.fillWidth: true
-          spacing: Style.spacing.sm
-
-          TextField {
-            id: searchField
-            Layout.fillWidth: true
-            foreground: root.foreground
-            placeholderText: "Filter by name, id, repo or stage"
-            text: root.searchText
-            onTextChanged: if (text !== root.searchText) root.searchText = text
-            Keys.onEscapePressed: function (event) {
-              if (root.searchText) root.searchText = ""
-              else root.close()
-              event.accepted = true
+            PanelActionButton {
+              visible: root.selected ? Model.canFix(root.selected) : root.fixable > 0
+              iconText: "󱚣"
+              tooltipText: root.selected ? "Fix with agent (f)" : "Fix all " + root.fixable + " with agent (f)"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              onClicked: root.selected ? root.fix(root.selected) : root.fixAll()
             }
-          }
 
-          Button {
-            text: "󰒺  " + Model.sortLabel(root.sortKey)
-            tooltipText: "Sort by (click to cycle)"
-            bordered: true
-            fontSize: Style.font.caption
-            onClicked: root.sortKey = Model.nextSort(root.sortKey)
-          }
-        }
-
-        Flow {
-          Layout.fillWidth: true
-          spacing: Style.spacing.xs
-
-          Repeater {
-            model: Model.FILTERS
-            Button {
-              required property var modelData
-              readonly property int count: Model.countFor(root.shown, modelData.key)
-              visible: modelData.key === "all" || count > 0 || root.filterKey === modelData.key
-              text: modelData.label + (modelData.key === "all" ? "" : " " + count)
-              selected: root.filterKey === modelData.key
-              bordered: true
-              fontSize: Style.font.caption
-              onClicked: root.filterKey = modelData.key
+            PanelActionButton {
+              visible: !root.selected
+              enabled: !root.loading
+              iconText: "󰑐"
+              tooltipText: root.loading ? "Checking…" : "Check GitHub now (r)"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              onClicked: root.refresh(true)
             }
           }
         }
 
-        PanelSeparator { Layout.fillWidth: true }
+        PanelSeparator { foreground: root.foreground }
 
-        Text {
-          Layout.fillWidth: true
-          visible: root.rows.length === 0 && !root.loading
-          text: root.plugins.length === 0 ? "No plugins found" : "Nothing matches this filter"
-          color: root.dim
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.bodySmall
-          horizontalAlignment: Text.AlignHCenter
-        }
-
-        ListView {
-          id: list
-          Layout.fillWidth: true
-          Layout.fillHeight: true
-          Layout.preferredHeight: contentHeight
-          model: root.rows
+        // ---------- list page ----------
+        Flickable {
+          id: listView
+          visible: !root.selected
+          width: parent.width
+          height: Math.min(contentHeight, Style.space(460))
+          contentHeight: listColumn.implicitHeight
           clip: true
-          spacing: Style.spacing.xxs
+          boundsBehavior: Flickable.StopAtBounds
+          interactive: contentHeight > height
           ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
-          delegate: Rectangle {
-            id: row
-            required property var modelData
-            required property int index
-            readonly property var p: row.modelData
-            readonly property bool expanded: root.expandedId === row.p.id
-            readonly property bool firstOfGroup: row.index === 0 || !!root.rows[row.index - 1].mine !== !!row.p.mine
+          Column {
+            id: listColumn
+            width: listView.width
+            spacing: Style.space(14)
 
-            width: list.width
-            height: content.implicitHeight + Style.spacing.sm * 2
-            radius: Style.cornerRadius
-            color: row.expanded || hover.containsMouse ? root.selectedBackground : "transparent"
+            Repeater {
+              model: root.groups
 
-            MouseArea {
-              id: hover
-              anchors.fill: parent
-              hoverEnabled: true
-              cursorShape: Qt.PointingHandCursor
-              onClicked: root.toggleExpanded(row.p)
+              Column {
+                id: group
+                required property var modelData
+                width: listColumn.width
+                spacing: Style.space(6)
+
+                PanelSectionHeader {
+                  text: group.modelData.label
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                }
+
+                Repeater {
+                  model: group.modelData.rows
+                  PluginRow {
+                    required property var modelData
+                    width: group.width
+                    p: modelData
+                    flatIndex: root.flat.indexOf(modelData)
+                  }
+                }
+              }
             }
 
-            ColumnLayout {
-              id: content
-              anchors.left: parent.left
-              anchors.right: parent.right
-              anchors.verticalCenter: parent.verticalCenter
-              anchors.leftMargin: Style.spacing.rowPaddingX
-              anchors.rightMargin: Style.spacing.rowPaddingX
-              spacing: Style.spacing.xxs
+            Text {
+              visible: root.plugins.length > 0 && root.groups.length === 0
+              width: parent.width
+              text: "Nothing to show"
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+            }
 
-              PanelSectionHeader {
-                visible: row.firstOfGroup
-                text: row.p.mine ? "YOUR PLUGINS" : "INSTALLED FROM OTHERS"
-              }
-
-              RowLayout {
-                Layout.fillWidth: true
-                spacing: Style.spacing.sm
-
-                Text {
-                  text: Model.healthGlyph(row.p.health)
-                  color: root.healthColor(row.p.health)
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.iconSmall
-                }
-
-                Text {
-                  Layout.fillWidth: true
-                  text: row.p.name
-                  elide: Text.ElideRight
-                  textFormat: Text.PlainText
-                  color: root.foreground
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.body
-                }
-
-                Text {
-                  visible: Model.unseen(row.p) > 0
-                  text: "󰍡 " + Model.unseen(row.p)
-                  color: root.accent
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.bodySmall
-                }
-
-                // lifecycle: one pip per stage, filled up to where the plugin is
-                Row {
-                  visible: row.p.mine && !Model.isArchived(row.p)
-                  spacing: Style.space(3)
-                  Repeater {
-                    model: Model.stageCount()
-                    Rectangle {
-                      required property int index
-                      width: Style.space(7)
-                      height: Style.space(7)
-                      radius: width / 2
-                      color: index < Model.stageStep(row.p.stage) ? root.accent : "transparent"
-                      border.width: 1
-                      border.color: index < Model.stageStep(row.p.stage) ? root.accent : root.dim
-                    }
-                  }
-                }
-
-                Text {
-                  text: Model.stageLabel(row.p.stage)
-                  color: root.dim
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
-                  Layout.preferredWidth: Style.space(96)
-                  horizontalAlignment: Text.AlignRight
-                  elide: Text.ElideLeft
-                }
-              }
-
-              RowLayout {
-                Layout.fillWidth: true
-                Layout.leftMargin: Style.space(22)
-                spacing: Style.spacing.sm
-
-                Text {
-                  Layout.fillWidth: true
-                  text: Model.subtitle(row.p)
-                  elide: Text.ElideRight
-                  textFormat: Text.PlainText
-                  color: root.dim
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
-                }
-
-                Text {
-                  visible: text !== ""
-                  text: Model.statsLine(row.p)
-                  textFormat: Text.PlainText
-                  color: (row.p.stars || row.p.forks) ? root.foreground : root.dim
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
-                }
-              }
-
-              // ---- details -----------------------------------------------
-              ColumnLayout {
-                visible: row.expanded
-                Layout.fillWidth: true
-                Layout.leftMargin: Style.space(22)
-                Layout.topMargin: Style.spacing.xxs
-                spacing: Style.spacing.xxs
-
-                Repeater {
-                  model: row.p.issues
-                  Text {
-                    required property var modelData
-                    Layout.fillWidth: true
-                    text: Model.healthGlyph(modelData.level) + "  " + modelData.text
-                    textFormat: Text.PlainText
-                    wrapMode: Text.WordWrap
-                    color: root.healthColor(modelData.level)
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.bodySmall
-                  }
-                }
-
-                Text {
-                  visible: row.p.issues.length === 0
-                  text: "Nothing to do. Nice."
-                  color: root.dim
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.bodySmall
-                }
-
-                // what people say: repo comments/issues and upstream Omarchy mentions
-                PanelSectionHeader {
-                  visible: (row.p.comments || []).length + (row.p.feedback ? row.p.feedback.upstreamMentions.length : 0) > 0
-                  text: "FEEDBACK"
-                  Layout.topMargin: Style.spacing.xxs
-                }
-
-                Repeater {
-                  model: (row.p.comments || []).slice(0, 6)
-                  Text {
-                    required property var modelData
-                    Layout.fillWidth: true
-                    text: (modelData.new ? "● " : "") + modelData.by + " · " + modelData.where + " · "
-                          + Model.relativeTime(modelData.at) + "  " + modelData.text
-                    textFormat: Text.PlainText
-                    elide: Text.ElideRight
-                    color: modelData.new ? root.accent : root.foreground
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.caption
-                    MouseArea {
-                      anchors.fill: parent
-                      cursorShape: Qt.PointingHandCursor
-                      onClicked: root.openUrl(parent.modelData.url)
-                    }
-                  }
-                }
-
-                Repeater {
-                  model: row.p.feedback ? row.p.feedback.upstreamMentions.slice(0, 5) : []
-                  Text {
-                    required property var modelData
-                    Layout.fillWidth: true
-                    text: "Omarchy · " + modelData.state + " · " + modelData.title
-                    textFormat: Text.PlainText
-                    elide: Text.ElideRight
-                    color: root.foreground
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.caption
-                    MouseArea {
-                      anchors.fill: parent
-                      cursorShape: Qt.PointingHandCursor
-                      onClicked: root.openUrl(parent.modelData.url)
-                    }
-                  }
-                }
-
-                Flow {
-                  Layout.fillWidth: true
-                  Layout.topMargin: Style.spacing.xxs
-                  spacing: Style.spacing.xs
-
-                  Button {
-                    visible: Model.canFix(row.p)
-                    text: "󱚣  Fix with agent"
-                    tooltipText: "Open your default agent in this repo with the issues above"
-                    bordered: true
-                    fontSize: Style.font.caption
-                    onClicked: root.fix(row.p)
-                  }
-                  Button {
-                    visible: row.p.mine && row.p.hasTests
-                    text: root.testingId === row.p.id ? "Testing…" : "Run tests"
-                    bordered: true
-                    fontSize: Style.font.caption
-                    enabled: root.testingId === ""
-                    onClicked: root.runTests(row.p)
-                  }
-                  Button {
-                    visible: !!row.p.tests
-                    text: "Test log"
-                    bordered: true
-                    fontSize: Style.font.caption
-                    onClicked: root.openLog(row.p)
-                  }
-                  Button {
-                    visible: Model.repoUrl(row.p) !== ""
-                    text: "GitHub"
-                    bordered: true
-                    fontSize: Style.font.caption
-                    onClicked: root.openUrl(Model.repoUrl(row.p))
-                  }
-                  Button {
-                    visible: Model.marketplaceUrl(row.p) !== ""
-                    text: "Marketplace #" + (row.p.marketplace && row.p.marketplace.issue ? row.p.marketplace.issue.number : "")
-                    bordered: true
-                    fontSize: Style.font.caption
-                    onClicked: root.openUrl(Model.marketplaceUrl(row.p))
-                  }
-                  Button {
-                    visible: !!row.p.ci && !!row.p.ci.url
-                    text: "CI run"
-                    bordered: true
-                    fontSize: Style.font.caption
-                    onClicked: root.openUrl(row.p.ci.url)
-                  }
-                  Button {
-                    visible: Model.canArchive(row.p)
-                    text: "Archive"
-                    tooltipText: "Stop tracking this plugin here. Nothing is uninstalled or changed on GitHub."
-                    bordered: true
-                    fontSize: Style.font.caption
-                    onClicked: root.setArchived(row.p, true)
-                  }
-                  Button {
-                    visible: Model.canUnarchive(row.p)
-                    text: "Unarchive"
-                    bordered: true
-                    fontSize: Style.font.caption
-                    onClicked: root.setArchived(row.p, false)
-                  }
-                  Button {
-                    text: "Open"
-                    tooltipText: row.p.path
-                    bordered: true
-                    fontSize: Style.font.caption
-                    onClicked: root.openFolder(row.p)
-                  }
-                }
+            // archived and other people's plugins fold into one quiet line
+            Text {
+              visible: Model.hiddenCount(root.plugins) > 0
+              width: parent.width
+              textFormat: Text.PlainText
+              text: root.showMore ? "Hide archived and others"
+                                  : "Show archived and others (" + Model.hiddenCount(root.plugins) + ")"
+              color: moreMouse.containsMouse ? root.foreground : root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              horizontalAlignment: Text.AlignHCenter
+              MouseArea {
+                id: moreMouse
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: root.showMore = !root.showMore
               }
             }
           }
         }
 
+        // ---------- detail page ----------
+        Column {
+          id: detail
+          visible: !!root.selected
+          width: parent.width
+          spacing: Style.space(12)
+          readonly property var p: root.selected || ({})
+
+          // lifecycle track, your plugins only
+          RowLayout {
+            visible: !!detail.p.mine && !Model.isArchived(detail.p)
+            width: parent.width
+            spacing: 0
+
+            Repeater {
+              model: Model.track()
+              ColumnLayout {
+                required property string modelData
+                required property int index
+                readonly property bool reached: index < Model.stageStep(detail.p.stage)
+                readonly property bool here: index === Model.stageStep(detail.p.stage) - 1
+                Layout.fillWidth: true
+                spacing: Style.space(4)
+
+                Rectangle {
+                  Layout.alignment: Qt.AlignHCenter
+                  width: Style.space(here ? 10 : 7)
+                  height: width
+                  radius: width / 2
+                  color: reached ? root.accent : "transparent"
+                  border.width: 1
+                  border.color: reached ? root.accent : root.dim
+                }
+                Text {
+                  Layout.alignment: Qt.AlignHCenter
+                  text: modelData
+                  color: here ? root.foreground : root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                  font.bold: here
+                }
+              }
+            }
+          }
+
+          Text {
+            width: parent.width
+            textFormat: Text.PlainText
+            text: Model.facts(detail.p)
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            wrapMode: Text.WordWrap
+          }
+
+          Column {
+            width: parent.width
+            spacing: Style.space(6)
+
+            Repeater {
+              model: detail.p.issues || []
+              RowLayout {
+                required property var modelData
+                width: parent.width
+                spacing: Style.space(8)
+                Text {
+                  Layout.alignment: Qt.AlignTop
+                  text: Model.healthGlyph(modelData.level)
+                  color: root.healthColor(modelData.level)
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                }
+                Text {
+                  Layout.fillWidth: true
+                  textFormat: Text.PlainText
+                  text: modelData.text
+                  color: modelData.level === "info" ? root.dim : root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                  wrapMode: Text.WordWrap
+                }
+              }
+            }
+
+            Text {
+              visible: (detail.p.issues || []).length === 0
+              text: "Nothing to do."
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+            }
+          }
+
+          Column {
+            visible: (detail.p.comments || []).length > 0
+            width: parent.width
+            spacing: Style.space(6)
+
+            PanelSectionHeader {
+              text: "COMMENTS"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+            }
+
+            Repeater {
+              model: (detail.p.comments || []).slice(0, 4)
+              Column {
+                id: comment
+                required property var modelData
+                width: parent.width
+                spacing: Style.space(1)
+                Text {
+                  width: parent.width
+                  textFormat: Text.PlainText
+                  text: (comment.modelData.new ? "● " : "") + comment.modelData.by + " · " + comment.modelData.where
+                        + " · " + Model.relativeTime(comment.modelData.at)
+                  color: comment.modelData.new ? root.accent : root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                  elide: Text.ElideRight
+                }
+                Text {
+                  width: parent.width
+                  textFormat: Text.PlainText
+                  text: comment.modelData.text
+                  color: commentMouse.containsMouse ? root.accent : root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                  elide: Text.ElideRight
+                  MouseArea {
+                    id: commentMouse
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: root.openUrl(comment.modelData.url)
+                  }
+                }
+              }
+            }
+          }
+
+          PanelSeparator { foreground: root.foreground }
+
+          // primary actions in words, the rest as quiet icons
+          RowLayout {
+            width: parent.width
+            spacing: Style.space(6)
+
+            Button {
+              visible: Model.canFix(detail.p)
+              text: "Fix with agent"
+              bordered: true
+              fontSize: Style.font.caption
+              onClicked: root.fix(detail.p)
+            }
+            Button {
+              visible: !!detail.p.mine && !!detail.p.hasTests && !Model.isArchived(detail.p)
+              text: root.testingId === detail.p.id ? "Testing…" : "Run tests"
+              bordered: true
+              fontSize: Style.font.caption
+              enabled: root.testingId === ""
+              onClicked: root.runTests(detail.p)
+            }
+            Button {
+              visible: Model.canUnarchive(detail.p)
+              text: "Unarchive"
+              bordered: true
+              fontSize: Style.font.caption
+              onClicked: root.setArchived(detail.p, false)
+            }
+
+            Item { Layout.fillWidth: true }
+
+            PanelActionButton {
+              visible: Model.repoUrl(detail.p) !== ""
+              iconText: "󰊤"
+              tooltipText: "GitHub"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              onClicked: root.openUrl(Model.repoUrl(detail.p))
+            }
+            PanelActionButton {
+              visible: !!detail.p.ci && !!detail.p.ci.url
+              iconText: "󰙨"
+              tooltipText: "Latest CI run"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              onClicked: root.openUrl(detail.p.ci.url)
+            }
+            PanelActionButton {
+              visible: Model.marketplaceUrl(detail.p) !== ""
+              iconText: "󰏓"
+              tooltipText: "Marketplace issue"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              onClicked: root.openUrl(Model.marketplaceUrl(detail.p))
+            }
+            PanelActionButton {
+              visible: !!detail.p.tests
+              iconText: "󰈙"
+              tooltipText: "Test log"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              onClicked: root.openPath(detail.p.tests.log)
+            }
+            PanelActionButton {
+              iconText: "󰉋"
+              tooltipText: "Open " + (detail.p.path || "")
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              onClicked: root.openPath(detail.p.path)
+            }
+            PanelActionButton {
+              visible: Model.canArchive(detail.p)
+              iconText: "󰀼"
+              tooltipText: "Archive: stop tracking it here. Nothing is uninstalled or changed on GitHub."
+              foreground: root.foreground
+              hoverColor: root.urgent
+              fontFamily: root.fontFamily
+              onClicked: root.setArchived(detail.p, true)
+            }
+          }
+        }
+
         Text {
-          Layout.fillWidth: true
-          text: "Click a plugin for details · right-click the bar icon to check GitHub"
-          color: root.dim
+          width: parent.width
+          textFormat: Text.PlainText
+          text: root.selected ? "Esc back · f fix · t run tests"
+                              : "↑↓ move · Enter open · f fix all · r check GitHub · m more"
+          color: Qt.darker(root.foreground, 1.8)
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
           horizontalAlignment: Text.AlignHCenter
         }
+      }
+    }
+  }
+
+  // ---- one plugin in the list ---------------------------------------------
+
+  component PluginRow: CursorSurface {
+    id: row
+    property var p: ({})
+    property int flatIndex: -1
+
+    hasCursor: root.cursor === row.flatIndex
+    foreground: root.foreground
+    implicitHeight: rowContent.implicitHeight + Style.spacing.rowPaddingX
+
+    MouseArea {
+      anchors.fill: parent
+      hoverEnabled: true
+      cursorShape: Qt.PointingHandCursor
+      onContainsMouseChanged: if (containsMouse) root.cursor = row.flatIndex
+      onClicked: root.openDetail(row.p)
+    }
+
+    Item {
+      id: rowContent
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.verticalCenter: parent.verticalCenter
+      anchors.leftMargin: Style.space(10)
+      anchors.rightMargin: Style.space(10)
+      implicitHeight: Math.max(glyph.implicitHeight, info.implicitHeight)
+
+      Text {
+        id: glyph
+        textFormat: Text.PlainText
+        anchors.left: parent.left
+        anchors.verticalCenter: parent.verticalCenter
+        text: Model.healthGlyph(row.p.health)
+        color: root.healthColor(row.p.health)
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.heading
+      }
+
+      Column {
+        id: info
+        anchors.left: glyph.right
+        anchors.leftMargin: Style.space(10)
+        anchors.right: trailing.left
+        anchors.rightMargin: Style.space(8)
+        anchors.verticalCenter: parent.verticalCenter
+        spacing: Style.space(1)
+
+        Text {
+          width: parent.width
+          textFormat: Text.PlainText
+          text: row.p.name || ""
+          color: root.foreground
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.body
+          elide: Text.ElideRight
+        }
+        Text {
+          width: parent.width
+          textFormat: Text.PlainText
+          text: Model.caption(row.p)
+          color: row.p.health === "error" ? root.urgent : root.dim
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+          elide: Text.ElideRight
+        }
+      }
+
+      Text {
+        id: trailing
+        anchors.right: parent.right
+        anchors.verticalCenter: parent.verticalCenter
+        text: Model.unseen(row.p) > 0 ? "●" : (row.hasCursor ? "󰅂" : "")
+        color: Model.unseen(row.p) > 0 ? root.accent : root.dim
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.bodySmall
       }
     }
   }

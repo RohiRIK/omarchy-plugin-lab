@@ -20,10 +20,7 @@
     "defaultSection": "right",
     "allowMultiple": false,
     "defaults": {
-      "refreshIntervalSec": 300,
-      "showInstalled": true,
-      "sortBy": "health",
-      "filter": "all"
+      "refreshIntervalSec": 300
     },
     "schema": [
       {
@@ -34,36 +31,6 @@
         "max": 3600,
         "step": 60,
         "defaultValue": 300
-      },
-      {
-        "key": "showInstalled",
-        "type": "boolean",
-        "label": "Show plugins by others"
-      },
-      {
-        "key": "sortBy",
-        "type": "enum",
-        "label": "Sort by",
-        "options": [
-          "health",
-          "stage",
-          "activity",
-          "stars",
-          "name"
-        ]
-      },
-      {
-        "key": "filter",
-        "type": "enum",
-        "label": "Default filter",
-        "options": [
-          "all",
-          "attention",
-          "mine",
-          "review",
-          "listed",
-          "others"
-        ]
       }
     ]
   }

@@ -42,8 +42,8 @@ The bar icon shows a count of broken plugins plus unread comments.
   **Unarchive** brings it back. Repos archived on GitHub are detected and
   archived automatically. The list lives in `~/.config/omarchy-plugin-lab/archived.json`.
 
-Filter (all, needs attention, mine, in review, listed, others, archived),
-search, and sort by health, stage, activity, stars or name.
+The list groups plugins into Needs you, Waiting and All good; archived and
+other people's plugins fold into one line. Click a plugin for its detail page.
 
 ## Install
 

@@ -1,8 +1,10 @@
 // Pure helpers for Panel.qml. No QML imports, so test/model.test.js can load
 // this file in node.
 
-// The pip track: needs-fixes sits with submitted, update with listed.
+// The lifecycle track on the detail page. needs-fixes sits with submitted,
+// update with listed.
 var STAGE_STEP = { local: 1, dev: 2, pushed: 3, submitted: 4, "needs-fixes": 4, listed: 5, update: 5, installed: 0, archived: 0 }
+var TRACK = ["Local", "Git", "GitHub", "Review", "Listed"]
 
 var STAGE_LABELS = {
   local: "Local",
@@ -16,24 +18,31 @@ var STAGE_LABELS = {
   archived: "Archived"
 }
 
-var HEALTH_RANK = { error: 0, warn: 1, info: 2, ok: 3 }
+// Few words per issue, for the one line under a plugin's name.
+var SHORT = {
+  ci: "CI failing",
+  tests: "Tests failing",
+  manifest: "Manifest invalid",
+  review: "Reviewers asked for fixes",
+  "stale-install": "Bar runs an older copy",
+  unverified: "Newer commit not verified",
+  rejected: "Submission closed",
+  "open-issues": "Open issues",
+  "open-prs": "Open pull requests",
+  dirty: "Uncommitted changes",
+  ahead: "Unpushed commits",
+  behind: "Behind GitHub",
+  "no-upstream": "Branch not tracking",
+  "no-ci": "No CI",
+  "no-tests": "No tests"
+}
 
-var SORTS = [
-  { key: "health", label: "Health" },
-  { key: "stage", label: "Stage" },
-  { key: "activity", label: "Activity" },
-  { key: "stars", label: "Stars" },
-  { key: "name", label: "Name" }
-]
-
-var FILTERS = [
-  { key: "all", label: "All" },
-  { key: "attention", label: "Needs attention" },
-  { key: "mine", label: "Mine" },
-  { key: "review", label: "In review" },
-  { key: "listed", label: "Listed" },
-  { key: "others", label: "Others" },
-  { key: "archived", label: "Archived" }
+var SECTIONS = [
+  { key: "needs", label: "NEEDS YOU" },
+  { key: "waiting", label: "WAITING" },
+  { key: "good", label: "ALL GOOD" },
+  { key: "archived", label: "ARCHIVED" },
+  { key: "others", label: "BY OTHERS" }
 ]
 
 function stageLabel(stage) {
@@ -44,8 +53,8 @@ function stageStep(stage) {
   return STAGE_STEP[stage] || 0
 }
 
-function stageCount() {
-  return 5
+function track() {
+  return TRACK.slice()
 }
 
 function healthGlyph(health) {
@@ -59,74 +68,94 @@ function unseen(plugin) {
   return plugin ? Number(plugin.unseen || 0) : 0
 }
 
+function isArchived(plugin) {
+  return !!plugin && plugin.stage === "archived"
+}
+
+function hasIssue(plugin, code) {
+  return (plugin.issues || []).some(function (i) { return i.code === code })
+}
+
+// Waiting: someone else has the next move (a reviewer or a verifier).
+function isWaiting(plugin) {
+  return plugin.stage === "submitted" || hasIssue(plugin, "re-review") || hasIssue(plugin, "verify")
+}
+
+function sectionOf(plugin) {
+  if (isArchived(plugin)) return "archived"
+  if (!plugin.mine) return "others"
+  if (plugin.health === "error" || plugin.health === "warn" || unseen(plugin) > 0) return "needs"
+  if (isWaiting(plugin)) return "waiting"
+  return "good"
+}
+
 function byName(a, b) {
   return String(a.name).localeCompare(String(b.name))
 }
 
-var COMPARATORS = {
-  health: function (a, b) { return (HEALTH_RANK[a.health] || 0) - (HEALTH_RANK[b.health] || 0) },
-  stage: function (a, b) { return stageStep(b.stage) - stageStep(a.stage) },
-  activity: function (a, b) { return (b.activityAt || 0) - (a.activityAt || 0) },
-  stars: function (a, b) { return ((b.stars || 0) + (b.forks || 0)) - ((a.stars || 0) + (a.forks || 0)) },
-  name: function () { return 0 }
-}
-
-// Yours before others', then by the chosen key, then by name. Never mutates.
-function sortPlugins(plugins, key) {
-  var cmp = COMPARATORS[key] || COMPARATORS.health
-  return (plugins || []).slice().sort(function (a, b) {
-    if (!!a.mine !== !!b.mine) return a.mine ? -1 : 1
-    return cmp(a, b) || byName(a, b)
+// Sections in display order, empty ones dropped. Within "needs", broken first.
+// Archived and others are left out unless `showMore`.
+function groups(plugins, showMore) {
+  var out = []
+  SECTIONS.forEach(function (s) {
+    if (!showMore && (s.key === "archived" || s.key === "others")) return
+    var rows = (plugins || []).filter(function (p) { return sectionOf(p) === s.key })
+    rows.sort(function (a, b) {
+      if (s.key === "needs" && (a.health === "error") !== (b.health === "error")) return a.health === "error" ? -1 : 1
+      return byName(a, b)
+    })
+    if (rows.length) out.push({ key: s.key, label: s.label, rows: rows })
   })
+  return out
 }
 
-// Archived plugins only show under their own filter.
-function matchesFilter(p, key) {
-  if ((p.stage === "archived") !== (key === "archived")) return false
-  if (key === "attention") return p.health === "error" || p.health === "warn" || unseen(p) > 0
-  if (key === "mine") return !!p.mine
-  if (key === "review") return p.stage === "submitted" || p.stage === "needs-fixes"
-  if (key === "listed") return p.stage === "listed" || p.stage === "update"
-  if (key === "others") return !p.mine
-  return true
+// The rows in on-screen order, for the keyboard cursor.
+function flatRows(groupList) {
+  var out = []
+  ;(groupList || []).forEach(function (g) { out = out.concat(g.rows) })
+  return out
 }
 
-function matchesText(p, text) {
-  var q = String(text || "").trim().toLowerCase()
-  if (!q) return true
-  return [p.name, p.id, p.author, p.repo, stageLabel(p.stage)].some(function (s) {
-    return String(s || "").toLowerCase().indexOf(q) >= 0
-  })
+function hiddenCount(plugins) {
+  return (plugins || []).filter(function (p) {
+    var s = sectionOf(p)
+    return s === "archived" || s === "others"
+  }).length
 }
 
-function visibleRows(plugins, filterKey, text, sortKey) {
-  return sortPlugins((plugins || []).filter(function (p) {
-    return matchesFilter(p, filterKey) && matchesText(p, text)
-  }), sortKey)
-}
-
-function countFor(plugins, key) {
-  return (plugins || []).filter(function (p) { return matchesFilter(p, key) }).length
-}
-
-function nextSort(key) {
-  for (var i = 0; i < SORTS.length; i++)
-    if (SORTS[i].key === key) return SORTS[(i + 1) % SORTS.length].key
-  return SORTS[0].key
-}
-
-function sortLabel(key) {
-  for (var i = 0; i < SORTS.length; i++)
-    if (SORTS[i].key === key) return SORTS[i].label
-  return SORTS[0].label
+// One short line under the name: what needs you, what you're waiting for, or where it is.
+function caption(plugin) {
+  var s = sectionOf(plugin)
+  if (s === "needs") {
+    var shorts = []
+    var n = unseen(plugin)
+    if (n > 0) shorts.push(n + " new comment" + (n === 1 ? "" : "s"))
+    ;(plugin.issues || []).forEach(function (i) {
+      if ((i.level === "error" || i.level === "warn") && SHORT[i.code]) shorts.push(SHORT[i.code])
+    })
+    return shorts.slice(0, 2).join(" · ") + (shorts.length > 2 ? " · +" + (shorts.length - 2) : "")
+  }
+  var mk = plugin.marketplace || {}
+  var num = mk.issue ? " · #" + mk.issue.number : ""
+  if (s === "waiting") {
+    if (hasIssue(plugin, "re-review")) return "Waiting for re-review" + num
+    if (hasIssue(plugin, "verify")) return "Update waiting for verification" + num
+    return "In marketplace review" + num
+  }
+  if (s === "archived") return plugin.archived === "github" ? "Archived on GitHub" : "Archived"
+  if (s === "others") return (plugin.version ? "v" + plugin.version : "") + (plugin.author ? " · by " + plugin.author : "")
+  return stageLabel(plugin.stage) + (plugin.version ? " · v" + plugin.version : "")
 }
 
 function summarize(plugins) {
-  var s = { mine: 0, installed: 0, errors: 0, warnings: 0, unseen: 0, listed: 0, stars: 0, forks: 0, archived: 0 }
+  var s = { mine: 0, installed: 0, errors: 0, warnings: 0, unseen: 0, listed: 0, stars: 0, forks: 0,
+            archived: 0, needs: 0, waiting: 0, good: 0 }
   ;(plugins || []).forEach(function (p) {
-    if (p.stage === "archived") { s.archived++; return }
+    var sec = sectionOf(p)
+    if (sec === "archived") { s.archived++; return }
     if (p.mine) s.mine++
     else s.installed++
+    if (sec === "needs" || sec === "waiting" || sec === "good") s[sec]++
     if (p.health === "error") s.errors++
     else if (p.health === "warn") s.warnings++
     if (p.stage === "listed" || p.stage === "update") s.listed++
@@ -137,10 +166,13 @@ function summarize(plugins) {
   return s
 }
 
-function summaryLine(s) {
-  var parts = [s.mine + " yours", s.listed + " listed", "★ " + s.stars, "⑂ " + s.forks]
-  if (s.errors) parts.push(s.errors + " broken")
-  if (s.unseen) parts.push(s.unseen + " new comment" + (s.unseen === 1 ? "" : "s"))
+// The hero's status line, already in caps like Omarchy's own panels.
+function heroStatus(s) {
+  var parts = []
+  if (s.needs) parts.push(s.needs + " NEED YOU")
+  if (s.waiting) parts.push(s.waiting + " WAITING")
+  if (s.good) parts.push(s.good + " FINE")
+  if (!parts.length) return s.mine ? "ALL GOOD" : "NO PLUGINS YET"
   return parts.join(" · ")
 }
 
@@ -175,36 +207,18 @@ function testsLabel(plugin) {
   return (t.ok ? "tests ✓" : "tests ✗") + (t.stale ? " (stale)" : "")
 }
 
-function subtitle(plugin) {
+// Detail page facts line: version, CI, tests, GitHub counters.
+function facts(plugin) {
   var bits = []
   if (plugin.version) bits.push("v" + plugin.version)
-  if (plugin.mine) {
+  if (plugin.mine && !isArchived(plugin)) {
     var ci = ciLabel(plugin.ci)
     if (ci) bits.push(ci)
     bits.push(testsLabel(plugin))
-  } else if (plugin.author) {
-    bits.push("by " + plugin.author)
   }
+  if (plugin.repo && plugin.mine)
+    bits.push("★ " + (plugin.stars || 0) + "  ⑂ " + (plugin.forks || 0) + "  󰈈 " + (plugin.watchers || 0))
   return bits.join(" · ")
-}
-
-// "★ 3  ⑂ 1  👁 2" for a plugin on GitHub, empty otherwise.
-function statsLine(plugin) {
-  if (!plugin || !plugin.repo || !plugin.mine) return ""
-  return "★ " + (plugin.stars || 0) + "  ⑂ " + (plugin.forks || 0) + "  󰈈 " + (plugin.watchers || 0)
-}
-
-function isArchived(plugin) {
-  return !!plugin && plugin.stage === "archived"
-}
-
-// Only an archive made here can be undone here; a GitHub archive is undone on GitHub.
-function canUnarchive(plugin) {
-  return isArchived(plugin) && plugin.archived === "here"
-}
-
-function canArchive(plugin) {
-  return !!plugin && !!plugin.mine && !isArchived(plugin)
 }
 
 function repoUrl(plugin) {
@@ -214,6 +228,15 @@ function repoUrl(plugin) {
 function marketplaceUrl(plugin) {
   var mk = plugin && plugin.marketplace
   return mk && mk.issue ? mk.issue.url : ""
+}
+
+// Only an archive made here can be undone here; a GitHub archive is undone on GitHub.
+function canUnarchive(plugin) {
+  return isArchived(plugin) && plugin.archived === "here"
+}
+
+function canArchive(plugin) {
+  return !!plugin && !!plugin.mine && !isArchived(plugin)
 }
 
 // Fixing makes sense when there is something to fix and the plugin is yours.
@@ -228,15 +251,12 @@ function fixableCount(plugins) {
 
 if (typeof module !== "undefined") {
   module.exports = {
-    SORTS: SORTS, FILTERS: FILTERS,
-    stageLabel: stageLabel, stageStep: stageStep, stageCount: stageCount,
-    healthGlyph: healthGlyph, unseen: unseen, sortPlugins: sortPlugins,
-    matchesFilter: matchesFilter, matchesText: matchesText, visibleRows: visibleRows,
-    countFor: countFor, nextSort: nextSort, sortLabel: sortLabel,
-    summarize: summarize, summaryLine: summaryLine, badge: badge,
-    relativeTime: relativeTime, ciLabel: ciLabel, testsLabel: testsLabel,
-    subtitle: subtitle, statsLine: statsLine, repoUrl: repoUrl,
-    marketplaceUrl: marketplaceUrl, canFix: canFix, fixableCount: fixableCount,
-    isArchived: isArchived, canArchive: canArchive, canUnarchive: canUnarchive
+    stageLabel: stageLabel, stageStep: stageStep, track: track, healthGlyph: healthGlyph,
+    unseen: unseen, isArchived: isArchived, isWaiting: isWaiting, sectionOf: sectionOf,
+    groups: groups, flatRows: flatRows, hiddenCount: hiddenCount, caption: caption,
+    summarize: summarize, heroStatus: heroStatus, badge: badge,
+    relativeTime: relativeTime, ciLabel: ciLabel, testsLabel: testsLabel, facts: facts,
+    repoUrl: repoUrl, marketplaceUrl: marketplaceUrl,
+    canArchive: canArchive, canUnarchive: canUnarchive, canFix: canFix, fixableCount: fixableCount
   }
 }
