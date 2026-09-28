@@ -590,6 +590,17 @@ Panel {
                 font.pixelSize: Style.font.bodySmall
                 wrapMode: Text.WordWrap
               }
+              // what to do about it, and what happens after
+              Text {
+                visible: !!modelData.action
+                Layout.fillWidth: true
+                textFormat: Text.PlainText
+                text: modelData.action || ""
+                color: modelData.level === "info" ? root.dim : root.accent
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                wrapMode: Text.WordWrap
+              }
               // what the claim is based on, so it can be checked in place
               Text {
                 visible: !!modelData.evidence

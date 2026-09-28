@@ -521,8 +521,8 @@ def inspect(pid, where, owners, enabled, fetch=False, market=None):
     info["archived"] = "here" if pid in archived_here() else ""
     issues = []
 
-    def issue(level, code, text, evidence=""):
-        issues.append({"level": level, "code": code, "text": text, "evidence": evidence})
+    def issue(level, code, text, evidence="", action=""):
+        issues.append({"level": level, "code": code, "text": text, "evidence": evidence, "action": action})
 
     remote_owner = repo.split("/")[0].lower() if repo else ""
     namespace = pid.split(".")[0].lower()
@@ -629,17 +629,34 @@ def inspect(pid, where, owners, enabled, fetch=False, market=None):
         elif stage == "submitted":
             issue("info", "submitted", f"Marketplace submission {num} is waiting for a maintainer")
         elif stage in ("listed", "update"):
+            # Published is published. What varies is which commit marketplace users get.
             listed, target = mk.get("listedCommit", ""), mk.get("verifyTarget", "")
-            ev = f"marketplace serves {short(listed)} · GitHub {default} {short(published)} · {fetched}"
+            since = time.strftime("%b %-d", time.localtime(mk["listedAt"])) if mk.get("listedAt") else ""
+            serves = f"marketplace serves {short(listed)}" + (f" (approved {since})" if since else "")
+            ev = f"{serves} · GitHub {default} {short(published)} · {fetched}"
+            behind_n = git(src, "rev-list", "--count", f"{listed}..{published}")[1] if listed and published else ""
+            newer = f"{behind_n} newer commit(s)" if behind_n and behind_n != "0" else "newer commits"
             if mk.get("verifyPending") and published and not published.startswith(target[:7]):
                 issue("warn", "verify-outdated",
-                      f"Update request {num} is for {short(target)}, but GitHub {default} is now {short(published)}: "
-                      "file a new verify request for the latest commit", ev + f" · request targets {short(target)}")
+                      f"Published, but marketplace users still get the {since or 'older'} version. "
+                      f"Your update request {num} asks for {short(target)}, and GitHub {default} has moved on to {short(published)}.",
+                      ev + f" · request {num} targets {short(target)}",
+                      f"Do: point {num} at {short(published)}, or file a new “Verify and publish a newer upstream commit” "
+                      f"request for it. Then: this moves to Waiting until a maintainer approves it.")
             elif mk.get("verifyPending"):
-                issue("info", "verify", f"Update to {short(target)} is waiting for verification ({num})", ev)
+                issue("info", "verify",
+                      f"Published. Your update to {short(target)} is waiting for a maintainer to verify it ({num}).",
+                      ev, "Nothing to do. If you push again before it is approved, the request will need the new commit.")
             elif stage == "update":
-                issue("warn", "unverified", f"Published at {short(listed)}, but GitHub {default} has newer commits: "
-                      "file a “Verify and publish a newer upstream commit” request", ev)
+                issue("warn", "unverified",
+                      f"Published, but marketplace users still get the {since or 'older'} version: "
+                      f"GitHub {default} has {newer} since.",
+                      ev,
+                      f"Do: file a “Verify and publish a newer upstream commit” request for {short(published)}. "
+                      "Then: this moves to Waiting until a maintainer approves it.")
+            else:
+                issue("info", "published",
+                      f"Published. Marketplace users get your latest {default} ({short(published)}).", ev)
         elif mk and mk["state"] == "closed":
             issue("warn", "rejected", f"Marketplace submission {num} was closed without a listing")
         elif stage == "pushed" and info["visibility"] == "private":
@@ -841,6 +858,7 @@ FIX_HINTS = {
     "stale-install": "Update the bar copy with `omarchy plugin update {id} --yes` (a fast-forward from GitHub). "
                      "First check the bar copy has no uncommitted changes and the working copy is pushed; otherwise ask me.",
     "unverified": "Draft a marketplace “Verify and publish a newer upstream commit” request for the pushed HEAD; do not file it.",
+    "verify-outdated": "Draft an update to the pending verify request so it targets the current published commit; do not post it.",
     "dirty": "Look at the uncommitted changes: commit them if they are finished, otherwise tell me what they are.",
     "ahead": "Unpushed commits: tell me what they are; do not push.",
     "behind": "Pull with `git pull --ff-only` if the working tree is clean.",
@@ -861,7 +879,7 @@ def plugin_block(info):
     lines = [f"{info['name']} ({info['id']} {info['version']}), stage {info['stage']}, in {info['path']}"
              + (f"; the bar runs {info['installedPath']}" if info.get("installedPath") and info["installedPath"] != info["path"] else "")]
     for i in info["issues"]:
-        lines.append(f"- [{i['level']}] {i['text']}")
+        lines.append(f"- [{i['level']}] {i['text']}" + (f" {i['action']}" if i.get("action") else ""))
         hint = FIX_HINTS.get(i["code"])
         if hint:
             lines.append("    fix: " + hint.format(id=info["id"]))

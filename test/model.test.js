@@ -84,7 +84,7 @@ test("published is published, whatever the pending update", function () {
   assert.strictEqual(Model.caption(verifying), "Published · update waiting for verification · #8")
   var outdated = { id: "o", name: "O", mine: true, health: "warn", stage: "update", issues: [issue("warn", "verify-outdated")] }
   assert.strictEqual(Model.sectionOf(outdated), "needs")
-  assert.strictEqual(Model.caption(outdated), "Update request outdated")
+  assert.strictEqual(Model.caption(outdated), "Published · update request is outdated")
 })
 
 test("freshness is always stated", function () {
