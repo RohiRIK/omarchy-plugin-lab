@@ -64,6 +64,16 @@ function healthGlyph(health) {
   return "󰄬"
 }
 
+// The row icon says which section it is in: only "needs you" rows show health.
+function rowGlyph(plugin) {
+  var s = sectionOf(plugin)
+  if (s === "needs") return healthGlyph(plugin.health)
+  if (s === "waiting") return "󰔟"
+  if (s === "archived") return "󰀼"
+  if (s === "others") return "󰏗"
+  return "󰄬"
+}
+
 function unseen(plugin) {
   return plugin ? Number(plugin.unseen || 0) : 0
 }
@@ -144,7 +154,7 @@ function caption(plugin) {
   }
   if (s === "archived") return plugin.archived === "github" ? "Archived on GitHub" : "Archived"
   if (s === "others") return (plugin.version ? "v" + plugin.version : "") + (plugin.author ? " · by " + plugin.author : "")
-  return stageLabel(plugin.stage) + (plugin.version ? " · v" + plugin.version : "")
+  return facts(plugin)
 }
 
 function summarize(plugins) {
@@ -207,7 +217,13 @@ function testsLabel(plugin) {
   return (t.ok ? "tests ✓" : "tests ✗") + (t.stale ? " (stale)" : "")
 }
 
-// Detail page facts line: version, CI, tests, GitHub counters.
+// "★ 3  ⑂ 1  󰈈 2" for your plugins on GitHub, empty otherwise.
+function stats(plugin) {
+  if (!plugin || !plugin.repo || !plugin.mine) return ""
+  return "★ " + (plugin.stars || 0) + "  ⑂ " + (plugin.forks || 0) + "  󰈈 " + (plugin.watchers || 0)
+}
+
+// Version, CI and tests.
 function facts(plugin) {
   var bits = []
   if (plugin.version) bits.push("v" + plugin.version)
@@ -216,8 +232,6 @@ function facts(plugin) {
     if (ci) bits.push(ci)
     bits.push(testsLabel(plugin))
   }
-  if (plugin.repo && plugin.mine)
-    bits.push("★ " + (plugin.stars || 0) + "  ⑂ " + (plugin.forks || 0) + "  󰈈 " + (plugin.watchers || 0))
   return bits.join(" · ")
 }
 
@@ -251,7 +265,7 @@ function fixableCount(plugins) {
 
 if (typeof module !== "undefined") {
   module.exports = {
-    stageLabel: stageLabel, stageStep: stageStep, track: track, healthGlyph: healthGlyph,
+    stageLabel: stageLabel, stageStep: stageStep, track: track, healthGlyph: healthGlyph, rowGlyph: rowGlyph, stats: stats,
     unseen: unseen, isArchived: isArchived, isWaiting: isWaiting, sectionOf: sectionOf,
     groups: groups, flatRows: flatRows, hiddenCount: hiddenCount, caption: caption,
     summarize: summarize, heroStatus: heroStatus, badge: badge,

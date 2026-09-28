@@ -36,7 +36,7 @@ test("captions are short", function () {
   assert.strictEqual(Model.caption(broken), "CI failing · No tests · +1")
   assert.strictEqual(Model.caption(warned), "2 new comments · Bar runs an older copy")
   assert.strictEqual(Model.caption(waiting), "Waiting for re-review · #7")
-  assert.strictEqual(Model.caption(fine), "Listed · v1.0")
+  assert.strictEqual(Model.caption(fine), "v1.0 · no tests")
   assert.strictEqual(Model.caption(gone), "Archived on GitHub")
   assert.strictEqual(Model.caption(theirs), "v2 · by Ajex")
 })
@@ -64,8 +64,13 @@ test("fix, archive and unarchive", function () {
   assert.ok(Model.canUnarchive(shelved) && !Model.canUnarchive(gone))
 })
 
-test("facts line", function () {
-  assert.ok(Model.facts(broken).indexOf("★ 3  ⑂ 1") >= 0)
+test("row glyph follows the section", function () {
+  assert.deepStrictEqual([broken, warned, waiting, fine, gone, theirs].map(Model.rowGlyph), ["󰅚", "󰀪", "󰔟", "󰄬", "󰀼", "󰏗"])
+})
+
+test("facts and stats", function () {
+  assert.strictEqual(Model.stats(broken), "★ 3  ⑂ 1  󰈈 0")
+  assert.strictEqual(Model.stats(theirs), "")
   assert.strictEqual(Model.ciLabel({ status: "completed", conclusion: "failure" }), "CI ✗")
   assert.strictEqual(Model.relativeTime(1000, 1000 + 7200), "2h ago")
 })
