@@ -3,12 +3,15 @@
 
 Subcommands (all print JSON on stdout):
 
-  status [--fetch]   every plugin, its stage and its issues
+  status [--fetch | --fetch-git]
+                     every plugin, its stage and its issues; --fetch refreshes
+                     everything now, --fetch-git only runs `git fetch`
   test <id>          run the plugin's own test suite, cache the result
   prompt <id>        the prompt `fix` would hand the agent
   fix <id>           open the default agent in the plugin's working copy
   fix-all            one agent session for every plugin that needs work
   prompt-all         the prompt `fix-all` would hand the agent
+  explain <id>       every ref, cache age and GitHub answer behind a plugin's row
   seen <id>          mark the plugin's comments as read
   archive <id>       stop tracking a plugin you no longer need (reversible)
   unarchive <id>     track it again
@@ -56,6 +59,7 @@ FEEDBACK_TTL = 900
 MARKET_ISSUES_TTL = 600
 REGISTRY_TTL = 3600
 TEST_TIMEOUT = 600
+FETCH_STALE = int(os.environ.get("PLUGIN_LAB_FETCH_STALE", 1800))  # git refs older than this are stale
 
 STAGE_ORDER = ["local", "dev", "pushed", "submitted", "needs-fixes", "listed", "update"]
 
@@ -217,7 +221,7 @@ def feedback_now(repo, pid, owners):
     open_items = gh_json("api", f"repos/{repo}/issues?state=open&per_page=50") or []
     comments = gh_json("api", f"repos/{repo}/issues/comments?per_page=30&sort=created&direction=desc") or []
     reviews = gh_json("api", f"repos/{repo}/pulls/comments?per_page=30&sort=created&direction=desc") or []
-    items = [{"kind": "pr" if i.get("pull_request") else "issue", "number": i["number"],
+    items = [{"kind": "pr" if "pull_request" in i else "issue", "number": i["number"],
               "title": i["title"], "by": i["user"]["login"], "url": i["html_url"],
               "at": iso_ts(i["created_at"])} for i in open_items]
     talk = [{"by": c["user"]["login"], "url": c["html_url"], "at": iso_ts(c["created_at"]), "where": "repo",
@@ -239,7 +243,8 @@ def feedback_now(repo, pid, owners):
         "watchers": meta.get("subscribers_count", 0),
         "pushedAt": iso_ts(meta.get("pushed_at")),
         "openIssues": sum(1 for i in items if i["kind"] == "issue"),
-        "openPrs": sum(1 for i in items if i["kind"] == "pr"),
+        # your own PRs are work in progress (see own_prs_now), not something to review
+        "openPrs": sum(1 for i in items if i["kind"] == "pr" and others(i["by"])),
         "items": items[:10], "comments": talk, "upstreamMentions": mentions,
     }
 
@@ -364,33 +369,132 @@ def marketplace_state(repo, head, registry, issues):
 
 # ---- one plugin ------------------------------------------------------------
 
-def git_state(path, fetch):
-    s = {"git": False, "remote": "", "repo": "", "branch": "", "head": "", "remoteHead": "",
-         "dirty": 0, "ahead": 0, "behind": 0, "upstream": False,
-         "tag": "", "versionTagged": False, "lastCommit": "", "lastCommitAt": 0}
+def git_dir(path):
+    rc, out, _ = git(path, "rev-parse", "--absolute-git-dir")
+    return Path(out) if rc == 0 and out else Path(path) / ".git"
+
+
+def fetch_repo(path):
+    """Fetch origin; the fetch time is read back from FETCH_HEAD, so it survives restarts."""
+    git(path, "fetch", "--quiet", "--prune", "--tags", "origin", timeout=60)
+
+
+def fetched_at(path):
+    try:
+        return int((git_dir(path) / "FETCH_HEAD").stat().st_mtime)
+    except OSError:
+        return 0
+
+
+def rev(path, ref):
+    rc, out, _ = git(path, "rev-parse", "--verify", "--quiet", ref + "^{commit}")
+    return out if rc == 0 else ""
+
+
+def default_branch(path, fallback=""):
+    """The branch GitHub publishes: origin/HEAD, then gh's answer, then main/master."""
+    rc, out, _ = git(path, "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD")
+    if rc == 0 and out.startswith("origin/"):
+        return out[len("origin/"):]
+    if fallback and rev(path, "origin/" + fallback):
+        return fallback
+    for name in ("main", "master"):
+        if rev(path, "origin/" + name):
+            return name
+    return ""
+
+
+def resolve_refs(path, default_hint=""):
+    """Everything is compared with the published default branch, never with
+    whatever branch happens to be checked out."""
+    s = {"git": False, "remote": "", "repo": "", "branch": "", "head": "",
+         "defaultBranch": "", "published": "", "localDefault": "",
+         "dirty": 0, "ahead": 0, "behind": 0, "upstream": False, "fetchedAt": 0,
+         "branches": [], "tag": "", "versionTagged": False, "lastCommit": "", "lastCommitAt": 0}
     if not (path / ".git").exists():
         return s
     s["git"] = True
     _, s["branch"], _ = git(path, "rev-parse", "--abbrev-ref", "HEAD")
-    _, s["head"], _ = git(path, "rev-parse", "HEAD")
+    s["head"] = rev(path, "HEAD")
     _, remote, _ = git(path, "config", "--get", "remote.origin.url")
     s["remote"], s["repo"] = remote, github_slug(remote)
-    if fetch and remote:
-        git(path, "fetch", "--quiet", "--tags", "origin", timeout=60)
+    s["fetchedAt"] = fetched_at(path) if remote else 0
     _, status, _ = git(path, "status", "--porcelain")
     s["dirty"] = len([l for l in status.splitlines() if l.strip()])
-    rc, counts, _ = git(path, "rev-list", "--left-right", "--count", "HEAD...@{u}")
-    if rc == 0 and counts:
+    default = default_branch(path, default_hint) if remote else ""
+    s["defaultBranch"] = default or s["branch"]
+    s["localDefault"] = rev(path, "refs/heads/" + s["defaultBranch"])
+    if default:
+        s["published"] = rev(path, "origin/" + default)
+    if s["published"] and s["localDefault"]:
         s["upstream"] = True
-        a, b = counts.split()
+        _, counts, _ = git(path, "rev-list", "--left-right", "--count", f"{s['localDefault']}...{s['published']}")
+        a, b = (counts.split() + ["0", "0"])[:2]
         s["ahead"], s["behind"] = int(a), int(b)
-        _, s["remoteHead"], _ = git(path, "rev-parse", "@{u}")
+    # work in progress: local branches with commits that are not published
+    base = s["published"] or s["localDefault"]
+    _, refs, _ = git(path, "for-each-ref", "refs/heads", "--format=%(refname:short)%09%(objectname)")
+    for line in refs.splitlines():
+        name, _, sha = line.partition("\t")
+        if not name or name == s["defaultBranch"]:
+            continue
+        _, n, _ = git(path, "rev-list", "--count", f"{base}..{sha}") if base else (0, "0", "")
+        if int(n or 0) == 0 and name != s["branch"]:
+            continue
+        s["branches"].append({"name": name, "head": sha, "unpublished": int(n or 0),
+                              "current": name == s["branch"],
+                              "pushed": rev(path, "origin/" + name) == sha})
     _, last, _ = git(path, "log", "-1", "--format=%ct%x09%s")
     if last:
         ts, _, subj = last.partition("\t")
         s["lastCommitAt"], s["lastCommit"] = int(ts or 0), subj
     _, s["tag"], _ = git(path, "describe", "--tags", "--abbrev=0")
     return s
+
+
+def running_copy(installed, work, linked=False):
+    """What the bar actually loads: a clone's HEAD, or your working tree when linked."""
+    if not installed:
+        return {"kind": "none"}
+    if linked or (work and installed == work):
+        return {"kind": "live", "path": str(installed)}
+    if not (installed / ".git").exists():
+        return {"kind": "files", "path": str(installed)}
+    _, branch, _ = git(installed, "rev-parse", "--abbrev-ref", "HEAD")
+    return {"kind": "clone", "path": str(installed), "head": rev(installed, "HEAD"), "branch": branch}
+
+
+def own_prs_now(repo, login):
+    prs = gh_json("pr", "list", "-R", repo, "--author", login, "--state", "open", "--json",
+                  "number,title,headRefName,url,mergeStateStatus,reviewDecision,statusCheckRollup")
+    if prs is None:
+        return None
+    out = []
+    for p in prs:
+        states = [str(c.get("conclusion") or c.get("state") or c.get("status") or "").upper()
+                  for c in p.get("statusCheckRollup") or []]
+        if any(x in ("FAILURE", "ERROR", "TIMED_OUT", "CANCELLED") for x in states):
+            checks = "failing"
+        elif any(x in ("PENDING", "IN_PROGRESS", "QUEUED", "EXPECTED") for x in states):
+            checks = "running"
+        else:
+            checks = "passing" if states else "none"
+        merge = {"CLEAN": "ready to merge", "BEHIND": "behind its base", "DIRTY": "has conflicts",
+                 "UNSTABLE": "checks not green", "DRAFT": "draft"}.get(p.get("mergeStateStatus"), "")
+        if p.get("mergeStateStatus") == "BLOCKED":
+            merge = "blocked: needs an approving review" if p.get("reviewDecision") == "REVIEW_REQUIRED" else "blocked"
+        out.append({"number": p["number"], "title": p["title"], "branch": p["headRefName"], "url": p["url"],
+                    "checks": checks, "merge": merge})
+    return out
+
+
+def cache_time(name, key):
+    hit = (read_json(CACHE_DIR / name, {}) or {}).get(key) or {}
+    return int(hit.get("at", 0))
+
+
+def short(sha):
+    return (sha or "")[:7] or "?"
 
 
 def inspect(pid, where, owners, enabled, fetch=False, market=None):
@@ -409,54 +513,66 @@ def inspect(pid, where, owners, enabled, fetch=False, market=None):
         "installed": installed is not None,
         "enabled": None if enabled is None or not installed else pid in enabled,
         "visibility": "", "ci": None, "tests": None, "feedback": None, "marketplace": None,
+        "ownPrs": [], "checked": {},
         "hasTests": test_command(src) is not None,
     }
-    info.update(git_state(src, fetch))
+    _, remote, _ = git(src, "config", "--get", "remote.origin.url") if (src / ".git").exists() else (1, "", "")
+    repo = github_slug(remote)
     info["archived"] = "here" if pid in archived_here() else ""
+    issues = []
+
+    def issue(level, code, text, evidence=""):
+        issues.append({"level": level, "code": code, "text": text, "evidence": evidence})
+
+    remote_owner = repo.split("/")[0].lower() if repo else ""
+    namespace = pid.split(".")[0].lower()
+    info["mine"] = bool(
+        remote_owner in owners
+        or (not remote_owner and (namespace in owners or info["author"].lower() in owners
+                                  or ((src / ".git").exists() and not remote)))
+    )
+
+    meta = {}
+    if info["mine"] and repo:
+        meta = cached("repo-meta.json", repo, REPO_TTL,
+                      lambda: gh_json("repo", "view", repo, "--json", "visibility,isArchived,defaultBranchRef"), fetch) or {}
+        info["visibility"] = str(meta.get("visibility") or "").lower()
+        if meta.get("isArchived"):
+            info["archived"] = "github"
+    info.update(resolve_refs(src, ((meta.get("defaultBranchRef") or {}).get("name") or "")))
+    info["checked"]["git"] = info["fetchedAt"]
     if version and info["git"]:
         _, tags, _ = git(src, "tag", "--list", f"v{version}", version)
         info["versionTagged"] = bool(tags)
-    issues = []
-
-    def issue(level, code, text):
-        issues.append({"level": level, "code": code, "text": text})
+    default = info["defaultBranch"]
+    published = info["published"]
+    fetched = f"fetched {ago(info['fetchedAt'])}" if info["fetchedAt"] else "never fetched"
 
     rc, out, err = run(["omarchy", "plugin", "validate", str(src)], timeout=15)
     info["manifestValid"] = rc == 0
     if rc != 0:
         detail = (err or out).splitlines()[-1] if (err or out) else ""
-        issue("error", "manifest", "Manifest fails validation" + (": " + detail if detail else ""))
+        issue("error", "manifest", "Manifest fails validation" + (": " + detail if detail else ""),
+              f"omarchy plugin validate {src}")
 
-    remote_owner = info["repo"].split("/")[0].lower() if info["repo"] else ""
-    namespace = pid.split(".")[0].lower()
-    info["mine"] = bool(
-        remote_owner in owners
-        or (not remote_owner and (namespace in owners or info["author"].lower() in owners
-                                  or (info["git"] and not info["remote"])))
-    )
-
-    # -- GitHub (own plugins only) ------------------------------------------
-    if info["mine"] and info["repo"]:
-        repo = info["repo"]
-        meta = cached("repo-meta.json", repo, REPO_TTL,
-                      lambda: gh_json("repo", "view", repo, "--json", "visibility,isArchived"), fetch) or {}
-        info["visibility"] = str(meta.get("visibility") or "").lower()
-        if meta.get("isArchived"):
-            info["archived"] = "github"
-    if info["mine"] and info["repo"] and not info["archived"]:
-        repo = info["repo"]
-        branch = info["branch"] or "main"
-
+    # -- GitHub (own plugins only), always about the published default branch --
+    if info["mine"] and repo and not info["archived"]:
         def ci_now():
-            runs = gh_json("run", "list", "-R", repo, "-b", branch, "-L", "1", "--json",
+            runs = gh_json("run", "list", "-R", repo, "-b", default, "-L", "1", "--json",
                            "status,conclusion,headSha,url,displayTitle,workflowName,createdAt")
             if runs is None:
                 return None
             return runs[0] if runs else {"status": "none"}
-        info["ci"] = cached("ci.json", f"{repo}@{branch}", CI_TTL, ci_now, fetch)
+        info["ci"] = cached("ci.json", f"{repo}@{default}", CI_TTL, ci_now, fetch)
+        info["checked"]["ci"] = cache_time("ci.json", f"{repo}@{default}")
         info["feedback"] = cached("feedback.json", repo, FEEDBACK_TTL, lambda: feedback_now(repo, pid, owners), fetch)
+        info["checked"]["feedback"] = cache_time("feedback.json", repo)
+        login = gh_login()
+        if login:
+            info["ownPrs"] = cached("prs.json", repo, CI_TTL, lambda: own_prs_now(repo, login), fetch) or []
         if market is not None:
-            info["marketplace"] = marketplace_state(repo, info["remoteHead"] or info["head"], *market)
+            info["marketplace"] = marketplace_state(repo, published, *market)
+            info["checked"]["marketplace"] = cache_time("marketplace.json", "issues:" + (login or "").lower())
 
     # -- comments from others, wherever they were left -------------------------
     fb = info["feedback"] or {}
@@ -501,57 +617,80 @@ def inspect(pid, where, owners, enabled, fetch=False, market=None):
 
     # -- issues ---------------------------------------------------------------
     if info["mine"]:
+        num = f"#{mk['issue']['number']}" if mk.get("issue") else ""
         if stage == "needs-fixes":
-            thread = "marketplace #" + str(mk["issue"]["number"])
+            thread = "marketplace " + num
             last_mine = max((c["at"] for c in mk["reviews"] if c["where"] == thread and c["by"].lower() in owners), default=0)
             last_theirs = max((c["at"] for c in mk["reviews"] if c["where"] == thread and c["by"].lower() not in owners), default=0)
             if last_mine > last_theirs:
-                issue("info", "re-review", f"You replied with fixes; waiting for the reviewers to look again (#{mk['issue']['number']})")
+                issue("info", "re-review", f"You replied with fixes; waiting for the reviewers to look again ({num})")
             else:
-                issue("error", "review", f"Marketplace reviewers asked for fixes (#{mk['issue']['number']})")
+                issue("error", "review", f"Marketplace reviewers asked for fixes ({num})")
         elif stage == "submitted":
-            issue("info", "submitted", f"Marketplace submission #{mk['issue']['number']} is waiting for a maintainer")
-        elif stage == "update" and mk.get("verifyPending"):
-            issue("info", "verify", f"Update to {mk['verifyTarget'][:7]} is waiting for verification (#{mk['issue']['number']})")
-        elif stage == "update":
-            issue("warn", "unverified", f"Listed at {mk['listedCommit'][:7]}, but GitHub has newer commits: "
-                                        "file a “Verify and publish a newer upstream commit” request")
+            issue("info", "submitted", f"Marketplace submission {num} is waiting for a maintainer")
+        elif stage in ("listed", "update"):
+            listed, target = mk.get("listedCommit", ""), mk.get("verifyTarget", "")
+            ev = f"marketplace serves {short(listed)} · GitHub {default} {short(published)} · {fetched}"
+            if mk.get("verifyPending") and published and not published.startswith(target[:7]):
+                issue("warn", "verify-outdated",
+                      f"Update request {num} is for {short(target)}, but GitHub {default} is now {short(published)}: "
+                      "file a new verify request for the latest commit", ev + f" · request targets {short(target)}")
+            elif mk.get("verifyPending"):
+                issue("info", "verify", f"Update to {short(target)} is waiting for verification ({num})", ev)
+            elif stage == "update":
+                issue("warn", "unverified", f"Published at {short(listed)}, but GitHub {default} has newer commits: "
+                      "file a “Verify and publish a newer upstream commit” request", ev)
         elif mk and mk["state"] == "closed":
-            issue("warn", "rejected", f"Marketplace submission #{mk['issue']['number']} was closed without a listing")
+            issue("warn", "rejected", f"Marketplace submission {num} was closed without a listing")
         elif stage == "pushed" and info["visibility"] == "private":
             issue("info", "private", "Repo is private, so it can't go on the marketplace or be `omarchy plugin add`ed")
         elif stage == "pushed" and info["visibility"] == "public" and market is not None:
             issue("info", "unsubmitted", "Public on GitHub, not submitted to the marketplace yet")
 
         ci = info["ci"] or {}
+        ci_ev = f"latest run on {default} · checked {ago(info['checked'].get('ci', 0))}"
         if ci.get("conclusion") == "failure":
-            issue("error", "ci", f"CI failing on {info['branch']}: {ci.get('workflowName', '')} “{ci.get('displayTitle', '')}”")
+            issue("error", "ci", f"CI failing on {default}: {ci.get('workflowName', '')} “{ci.get('displayTitle', '')}”", ci_ev)
         elif ci.get("status") in ("in_progress", "queued"):
-            issue("info", "ci-running", "CI is running")
+            issue("info", "ci-running", f"CI is running on {default}", ci_ev)
         elif info["repo"] and ci.get("status") == "none":
-            issue("warn", "no-ci", "No CI runs on GitHub")
+            issue("warn", "no-ci", f"No CI runs on {default}", ci_ev)
         if info["unseen"]:
             issue("warn", "feedback", f"{info['unseen']} new comment(s) from others")
         if fb.get("openIssues"):
             issue("warn", "open-issues", f"{fb['openIssues']} open issue(s) on GitHub")
         if fb.get("openPrs"):
-            issue("warn", "open-prs", f"{fb['openPrs']} open pull request(s) waiting for review")
+            issue("warn", "open-prs", f"{fb['openPrs']} pull request(s) from others waiting for your review")
+        for pr in info["ownPrs"]:
+            if pr["checks"] == "failing" or pr["merge"] == "has conflicts":
+                issue("warn", "own-pr", f"Your PR #{pr['number']} ({pr['branch']}): "
+                      + ("checks failing" if pr["checks"] == "failing" else "has conflicts"), pr["url"])
         if fb.get("upstreamMentions"):
             issue("info", "upstream", f"Mentioned {len(fb['upstreamMentions'])} time(s) in {UPSTREAM}")
         if t and not t.get("ok"):
-            issue("error", "tests", "Local tests failed" + (" (before your latest changes)" if t.get("stale") else ""))
+            issue("error", "tests", "Local tests failed" + (" (before your latest changes)" if t.get("stale") else ""), t.get("log", ""))
         if not info["hasTests"]:
             issue("warn", "no-tests", "No test suite (test/run or tests/*test*.sh)")
         elif not t:
             issue("info", "tests-unrun", "Tests have not been run here yet")
         if info["dirty"]:
-            issue("warn", "dirty", f"{info['dirty']} uncommitted change(s)")
+            issue("warn", "dirty", f"{info['dirty']} uncommitted change(s)", f"git status in {src} (branch {info['branch']})")
         if info["ahead"]:
-            issue("warn", "ahead", f"{info['ahead']} commit(s) not pushed")
+            ev = f"local {default} {short(info['localDefault'])} · GitHub {default} {short(published)} · {fetched}"
+            # commits already on a branch with your open PR are pushed, just not merged
+            in_pr = next((pr for pr in info["ownPrs"]
+                          if rev(src, "origin/" + pr["branch"]) and
+                          git(src, "rev-list", "--count", f"origin/{pr['branch']}..{info['localDefault']}")[1] == "0"), None)
+            if in_pr:
+                issue("info", "ahead-in-pr", f"{info['ahead']} commit(s) on your {default} are waiting in PR #{in_pr['number']} "
+                      f"({in_pr['merge'] or in_pr['checks']})", ev + f" · in origin/{in_pr['branch']}")
+            else:
+                issue("warn", "ahead", f"{info['ahead']} commit(s) on your {default} not pushed", ev)
         if info["behind"]:
-            issue("warn", "behind", f"{info['behind']} commit(s) on GitHub not pulled into {src}")
-        if info["git"] and info["remote"] and not info["upstream"]:
-            issue("warn", "no-upstream", f"Branch {info['branch']} does not track a remote branch")
+            issue("warn", "behind", f"Your local {default} is {info['behind']} commit(s) behind GitHub",
+                  f"local {default} {short(info['localDefault'])} · GitHub {default} {short(published)} · {fetched}")
+        if info["git"] and info["remote"] and not published:
+            issue("warn", "no-upstream", f"No origin/{default or 'main'} to compare with (never fetched?)")
         if not info["git"]:
             issue("info", "no-git", "Not a git repo yet")
         elif not info["remote"]:
@@ -565,23 +704,42 @@ def inspect(pid, where, owners, enabled, fetch=False, market=None):
         if info["dirty"]:
             issue("warn", "dirty", f"{info['dirty']} local edit(s) to someone else's plugin, lost on update")
 
-    # -- the copy the bar runs vs the copy you work in ------------------------
-    if installed and work and (installed / ".git").exists():
-        _, ihead, _ = git(installed, "rev-parse", "HEAD")
-        if ihead and ihead != info["head"]:
-            behind = git(work, "merge-base", "--is-ancestor", ihead, info["head"])[0] == 0
+    # -- what the bar runs vs what is published --------------------------------
+    running = running_copy(installed, work, bool(where["installed"] and where["installed"].is_symlink()))
+    info["running"] = running
+    if running["kind"] == "clone" and work and published:
+        rhead = running["head"]
+        if rhead != published:
+            older = git(src, "merge-base", "--is-ancestor", rhead, published)[0] == 0
+            n = git(src, "rev-list", "--count", f"{rhead}..{published}")[1] if older else ""
             issue("warn", "stale-install",
-                  f"Your bar runs {ihead[:7]} from {installed}, older than your working copy ({info['head'][:7]})"
-                  if behind else f"Your bar runs {ihead[:7]} from {installed}, which differs from your working copy")
-        info["installedHead"] = ihead
+                  f"Your bar runs {short(rhead)}, {n} commit(s) behind GitHub {default} ({short(published)})"
+                  if older else f"Your bar runs {short(rhead)}, which is not on GitHub {default}",
+                  f"bar {short(rhead)} ({running['branch']}) at {installed} · GitHub {default} {short(published)} · {fetched}")
     if not installed:
         issue("info", "not-installed", "Not installed in this shell")
     elif info["enabled"] is False:
         issue("info", "disabled", "Installed but not enabled")
 
+    # -- work in progress: branches and your own PRs (facts, not problems) -----
+    work_items = []
+    prs_by_branch = {pr["branch"]: pr for pr in info["ownPrs"]}
+    for b in info["branches"]:
+        pr = prs_by_branch.pop(b["name"], None)
+        work_items.append(dict(b, pr=pr))
+    for pr in prs_by_branch.values():
+        work_items.append({"name": pr["branch"], "current": False, "unpublished": 0, "pushed": True, "pr": pr})
+    info["openWork"] = work_items
+
+    # -- freshness: say it, never hide it --------------------------------------
+    limits = {"git": FETCH_STALE, "ci": 2 * CI_TTL, "feedback": 2 * FEEDBACK_TTL, "marketplace": 2 * MARKET_ISSUES_TTL}
+    now = time.time()
+    info["stale"] = sorted(k for k, ts in info["checked"].items()
+                           if info["mine"] and not info["archived"] and info["remote"] and (not ts or now - ts > limits[k]))
+
     # Archived: nothing to do, except remember it may still be on your bar.
     if info["archived"]:
-        issues[:] = [{"level": "info", "code": "archived",
+        issues[:] = [{"level": "info", "code": "archived", "evidence": "",
                       "text": "Repo archived on GitHub" if info["archived"] == "github" else "Archived in Plugin Lab"}]
         if info["enabled"]:
             issue("info", "archived-enabled", "Still enabled in the shell")
@@ -593,13 +751,39 @@ def inspect(pid, where, owners, enabled, fetch=False, market=None):
     return info
 
 
-def status(fetch=False):
+def ago(ts):
+    if not ts:
+        return "never"
+    d = max(0, int(time.time() - ts))
+    if d < 60:
+        return "just now"
+    if d < 3600:
+        return f"{d // 60}m ago"
+    if d < 86400:
+        return f"{d // 3600}h ago"
+    return f"{d // 86400}d ago"
+
+
+def status(fetch=False, fetch_git=False):
+    """fetch: refresh everything now. fetch_git: only `git fetch` every repo (the background timer)."""
     owners = default_owners()
     enabled = enabled_ids()
     login = gh_login()
+    found = sorted(discover().items())
+    if fetch or fetch_git:
+        from concurrent.futures import ThreadPoolExecutor
+        repos = {(w["work"] or w["installed"]).resolve() for _, w in found}
+        repos |= {w["installed"].resolve() for _, w in found if w["installed"]}
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            list(pool.map(fetch_repo, [r for r in repos if (r / ".git").exists()]))
     market = (registry_index(fetch), marketplace_issues(login, fetch)) if login else None
-    plugins = [inspect(pid, where, owners, enabled, fetch, market) for pid, where in sorted(discover().items())]
-    return {"generatedAt": int(time.time()), "marketplace": MARKETPLACE, "plugins": plugins}
+    plugins = [inspect(pid, where, owners, enabled, fetch, market) for pid, where in found]
+    mine = [p for p in plugins if p["mine"] and not p["archived"] and p["remote"]]
+    checked = [ts for p in mine for ts in p["checked"].values()]
+    return {"generatedAt": int(time.time()), "marketplace": MARKETPLACE,
+            "checkedAt": min(checked) if checked else 0,
+            "stale": sorted({k for p in mine for k in p["stale"]}),
+            "plugins": plugins}
 
 
 def find(pid):
@@ -666,6 +850,8 @@ FIX_HINTS = {
 }
 
 RULES = [
+    "Before trusting a flagged state, check it: `python3 " + str(Path(__file__).resolve()) + " explain <id>` "
+    "prints the refs and GitHub answers behind it. Trust that and git/gh over this summary.",
     "Never edit /usr/share/omarchy. After changing code the bar runs, run `omarchy restart shell` to load it.",
     "Commit fixes locally, but ask me before pushing, tagging, commenting on GitHub, filing marketplace issues or submitting anything.",
 ]
@@ -734,6 +920,23 @@ def fix_all_prompt(plugins):
     ])
 
 
+def explain(pid):
+    """Every ref, cache age and raw GitHub answer behind one plugin's row, to check it by hand."""
+    info = inspect_one(pid)
+    if not info:
+        return {"error": f"No plugin {pid}"}
+    keys = ("id", "stage", "health", "path", "branch", "head", "defaultBranch", "published", "localDefault",
+            "ahead", "behind", "dirty", "fetchedAt", "running", "openWork", "ownPrs", "ci", "marketplace",
+            "visibility", "archived", "stale")
+    out = {k: info.get(k) for k in keys}
+    if out.get("marketplace"):
+        out["marketplace"] = {k: v for k, v in out["marketplace"].items() if k != "reviews"}
+    out["checked"] = {k: ago(v) for k, v in info["checked"].items()}
+    out["issues"] = [f"[{i['level']}] {i['text']}" + (f"  <- {i['evidence']}" if i.get("evidence") else "")
+                     for i in info["issues"]]
+    return out
+
+
 def launch_agent(prompt, cwd):
     subprocess.Popen(["omarchy-agent-prompt", prompt], cwd=cwd,
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
@@ -763,9 +966,12 @@ def main(argv):
         return 2
     cmd, rest = argv[0], argv[1:]
     if cmd == "status":
-        out = status(fetch="--fetch" in rest)
+        out = status(fetch="--fetch" in rest, fetch_git="--fetch-git" in rest)
     elif cmd == "fix-all":
         out = launch_fix_all()
+    elif cmd == "explain" and rest:
+        print(json.dumps(explain(rest[0]), indent=2))
+        return 0
     elif cmd == "prompt-all":
         out = {"prompt": fix_all_prompt(status()["plugins"])}
     elif cmd in ("archive", "unarchive") and rest:

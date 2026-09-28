@@ -21,6 +21,30 @@ under `~/Work`:
 
 The bar icon shows a count of broken plugins plus unread comments.
 
+## How Plugin Lab decides
+
+Every state is computed from three commits, never from whatever branch happens
+to be checked out:
+
+- **published**: `origin/<default branch>` (from `origin/HEAD`, else GitHub's default branch)
+- **running**: what your bar loads, the installed clone's `HEAD`, or your working tree when the
+  plugin is symlinked into `~/.config/omarchy/plugins` (shown as live)
+- **local default**: your working copy's local default branch
+
+| Question | Compared | Shown as |
+|---|---|---|
+| Is my bar running what's published? | running vs published | "Your bar runs X, N commits behind GitHub main" |
+| Did I push my work? | local default vs published | "N commits not pushed", or "waiting in PR #n" when your open PR holds them |
+| What's in progress? | other branches and your own PRs | an **Open work** list, not a problem |
+| Is CI green? | latest run on the default branch | CI ✓ / ✗ |
+| Is the marketplace current? | listed commit and any verify request vs published | Published, plus "update request outdated" when it targets an older commit |
+
+Only other people's PRs count as needing your review. Git is fetched in the
+background every 15 minutes (`fetchIntervalMin`); the hero says when data was
+checked and flags any source that is older than it should be. Each issue shows
+the evidence it is based on, and `python3 collector.py explain <id>` prints
+every ref, cache age and GitHub answer behind a row.
+
 ## Actions
 
 - **Fix with agent** opens your default agent (`omarchy agent prompt`) in the

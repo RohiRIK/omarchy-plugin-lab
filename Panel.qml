@@ -28,9 +28,12 @@ Panel {
 
   readonly property string collector: Qt.resolvedUrl("collector.py").toString().replace("file://", "")
   readonly property int refreshIntervalSec: Math.max(60, Number(setting("refreshIntervalSec", 300)))
+  readonly property int fetchIntervalMin: Math.max(5, Number(setting("fetchIntervalMin", 15)))
 
   // ---- data ---------------------------------------------------------------
   property var plugins: []
+  property int checkedAt: 0
+  property var staleSources: []
   property string loadError: ""
   property bool loading: false
   property string testingId: ""
@@ -66,12 +69,13 @@ Panel {
 
   // ---- behaviour ----------------------------------------------------------
 
-  function refresh(fetch) {
+  // mode: "" cached, "git" background git fetch, "all" refresh everything now
+  function refresh(fetch, mode) {
     if (statusProc.running)
       return
     root.loading = true
-    statusProc.command = fetch ? ["python3", root.collector, "status", "--fetch"]
-                               : ["python3", root.collector, "status"]
+    var flag = fetch ? "--fetch" : (mode === "git" ? "--fetch-git" : "")
+    statusProc.command = flag ? ["python3", root.collector, "status", flag] : ["python3", root.collector, "status"]
     statusProc.running = true
   }
 
@@ -162,7 +166,10 @@ Panel {
       onStreamFinished: {
         root.loading = false
         try {
-          root.plugins = JSON.parse(text).plugins || []
+          var data = JSON.parse(text)
+          root.plugins = data.plugins || []
+          root.checkedAt = Number(data.checkedAt || 0)
+          root.staleSources = data.stale || []
           root.loadError = ""
         } catch (e) {
           root.loadError = "Could not read plugin status"
@@ -191,6 +198,15 @@ Panel {
     running: true
     repeat: true
     onTriggered: root.refresh(false)
+  }
+
+  // Remote refs go stale without a fetch, so fetch in the background too.
+  Timer {
+    interval: root.fetchIntervalMin * 60 * 1000
+    running: true
+    repeat: true
+    triggeredOnStart: true
+    onTriggered: root.refresh(false, "git")
   }
 
   // ---- bar button ---------------------------------------------------------
@@ -282,6 +298,7 @@ Panel {
               text: root.loadError !== "" ? root.loadError.toUpperCase()
                   : root.plugins.length === 0 && root.loading ? "LOOKING…"
                   : Model.heroStatus(root.summary)
+                    + (Model.freshness(root.checkedAt, root.staleSources) ? " · " + Model.freshness(root.checkedAt, root.staleSources) : "")
               color: root.loadError !== "" ? root.urgent : Qt.darker(root.foreground, 1.4)
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
@@ -561,14 +578,29 @@ Panel {
               font.family: root.fontFamily
               font.pixelSize: Style.font.bodySmall
             }
-            Text {
+            ColumnLayout {
               Layout.fillWidth: true
-              textFormat: Text.PlainText
-              text: modelData.text
-              color: modelData.level === "info" ? root.dim : root.foreground
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.bodySmall
-              wrapMode: Text.WordWrap
+              spacing: Style.space(1)
+              Text {
+                Layout.fillWidth: true
+                textFormat: Text.PlainText
+                text: modelData.text
+                color: modelData.level === "info" ? root.dim : root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                wrapMode: Text.WordWrap
+              }
+              // what the claim is based on, so it can be checked in place
+              Text {
+                visible: !!modelData.evidence
+                Layout.fillWidth: true
+                textFormat: Text.PlainText
+                text: modelData.evidence || ""
+                color: Qt.darker(root.foreground, 1.9)
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                wrapMode: Text.WordWrap
+              }
             }
           }
         }
@@ -579,6 +611,37 @@ Panel {
           color: root.dim
           font.family: root.fontFamily
           font.pixelSize: Style.font.bodySmall
+        }
+
+        PanelSectionHeader {
+          visible: (row.p.openWork || []).length > 0
+          Layout.topMargin: Style.space(4)
+          text: "OPEN WORK"
+          foreground: root.foreground
+          fontFamily: root.fontFamily
+        }
+
+        Repeater {
+          model: row.open ? (row.p.openWork || []) : []
+          Text {
+            id: workItem
+            required property var modelData
+            Layout.fillWidth: true
+            textFormat: Text.PlainText
+            text: Model.workLine(modelData)
+            color: workMouse.containsMouse && modelData.pr ? root.accent : root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            elide: Text.ElideRight
+            MouseArea {
+              id: workMouse
+              anchors.fill: parent
+              hoverEnabled: true
+              enabled: !!workItem.modelData.pr
+              cursorShape: Qt.PointingHandCursor
+              onClicked: root.openUrl(workItem.modelData.pr.url)
+            }
+          }
         }
 
         PanelSectionHeader {

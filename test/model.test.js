@@ -75,6 +75,32 @@ test("facts and stats", function () {
   assert.strictEqual(Model.relativeTime(1000, 1000 + 7200), "2h ago")
 })
 
+test("published is published, whatever the pending update", function () {
+  assert.strictEqual(Model.stageLabel("listed"), "Published")
+  assert.strictEqual(Model.stageLabel("update"), "Published")
+  var verifying = { id: "v", name: "V", mine: true, health: "info", stage: "update",
+                    marketplace: { issue: { number: 8 } }, issues: [issue("info", "verify")] }
+  assert.strictEqual(Model.sectionOf(verifying), "waiting")
+  assert.strictEqual(Model.caption(verifying), "Published · update waiting for verification · #8")
+  var outdated = { id: "o", name: "O", mine: true, health: "warn", stage: "update", issues: [issue("warn", "verify-outdated")] }
+  assert.strictEqual(Model.sectionOf(outdated), "needs")
+  assert.strictEqual(Model.caption(outdated), "Update request outdated")
+})
+
+test("freshness is always stated", function () {
+  assert.strictEqual(Model.freshness(1000, [], 1000 + 180), "CHECKED 3M AGO")
+  assert.strictEqual(Model.freshness(1000, ["git"], 1000 + 180), "STALE GIT · PRESS R")
+  assert.strictEqual(Model.freshness(0, []), "")
+})
+
+test("open work lines", function () {
+  assert.strictEqual(Model.workLine({ name: "feat", current: true, unpublished: 1, pushed: false }),
+                     "feat (checked out) · 1 commit not on main · not pushed")
+  assert.strictEqual(Model.workLine({ name: "fix", pushed: true, unpublished: 0,
+                                      pr: { number: 1, checks: "passing", merge: "blocked: needs an approving review" } }),
+                     "fix · PR #1 · checks passing · blocked: needs an approving review")
+})
+
 var failed = 0
 tests.forEach(function (t) {
   try { t[1](); console.log("ok   " + t[0]) }

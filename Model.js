@@ -4,7 +4,7 @@
 // The lifecycle track on the detail page. needs-fixes sits with submitted,
 // update with listed.
 var STAGE_STEP = { local: 1, dev: 2, pushed: 3, submitted: 4, "needs-fixes": 4, listed: 5, update: 5, installed: 0, archived: 0 }
-var TRACK = ["Local", "Git", "GitHub", "Review", "Listed"]
+var TRACK = ["Local", "Git", "GitHub", "Review", "Published"]
 
 var STAGE_LABELS = {
   local: "Local",
@@ -12,8 +12,8 @@ var STAGE_LABELS = {
   pushed: "On GitHub",
   submitted: "In review",
   "needs-fixes": "Needs fixes",
-  listed: "Listed",
-  update: "Update pending",
+  listed: "Published",
+  update: "Published",
   installed: "Installed",
   archived: "Archived"
 }
@@ -26,6 +26,8 @@ var SHORT = {
   review: "Reviewers asked for fixes",
   "stale-install": "Bar runs an older copy",
   unverified: "Newer commit not verified",
+  "verify-outdated": "Update request outdated",
+  "own-pr": "Your PR needs attention",
   rejected: "Submission closed",
   "open-issues": "Open issues",
   "open-prs": "Open pull requests",
@@ -89,6 +91,7 @@ function hasIssue(plugin, code) {
 // Waiting: someone else has the next move (a reviewer or a verifier).
 function isWaiting(plugin) {
   return plugin.stage === "submitted" || hasIssue(plugin, "re-review") || hasIssue(plugin, "verify")
+      || hasIssue(plugin, "ahead-in-pr")
 }
 
 function sectionOf(plugin) {
@@ -149,7 +152,8 @@ function caption(plugin) {
   var num = mk.issue ? " · #" + mk.issue.number : ""
   if (s === "waiting") {
     if (hasIssue(plugin, "re-review")) return "Waiting for re-review" + num
-    if (hasIssue(plugin, "verify")) return "Update waiting for verification" + num
+    if (hasIssue(plugin, "verify")) return "Published · update waiting for verification" + num
+    if (hasIssue(plugin, "ahead-in-pr")) return "Your PR is waiting to merge"
     return "In marketplace review" + num
   }
   if (s === "archived") return plugin.archived === "github" ? "Archived on GitHub" : "Archived"
@@ -184,6 +188,22 @@ function heroStatus(s) {
   if (s.good) parts.push(s.good + " FINE")
   if (!parts.length) return s.mine ? "ALL GOOD" : "NO PLUGINS YET"
   return parts.join(" · ")
+}
+
+// "CHECKED 3M AGO", or a plain warning when any source is older than it should be.
+function freshness(checkedAt, stale, now) {
+  if (stale && stale.length) return "STALE " + stale.join(", ").toUpperCase() + " · PRESS R"
+  if (!checkedAt) return ""
+  return "CHECKED " + relativeTime(checkedAt, now).toUpperCase()
+}
+
+// One line per branch or PR you have in flight.
+function workLine(w) {
+  var bits = [w.name + (w.current ? " (checked out)" : "")]
+  if (w.unpublished) bits.push(w.unpublished + " commit" + (w.unpublished === 1 ? "" : "s") + " not on main")
+  if (w.pr) bits.push("PR #" + w.pr.number + " · checks " + w.pr.checks + (w.pr.merge ? " · " + w.pr.merge : ""))
+  else if (!w.pushed) bits.push("not pushed")
+  return bits.join(" · ")
 }
 
 // Bar label next to the icon: broken plugins plus unread comments, or nothing.
@@ -268,7 +288,7 @@ if (typeof module !== "undefined") {
     stageLabel: stageLabel, stageStep: stageStep, track: track, healthGlyph: healthGlyph, rowGlyph: rowGlyph, stats: stats,
     unseen: unseen, isArchived: isArchived, isWaiting: isWaiting, sectionOf: sectionOf,
     groups: groups, flatRows: flatRows, hiddenCount: hiddenCount, caption: caption,
-    summarize: summarize, heroStatus: heroStatus, badge: badge,
+    summarize: summarize, heroStatus: heroStatus, badge: badge, freshness: freshness, workLine: workLine,
     relativeTime: relativeTime, ciLabel: ciLabel, testsLabel: testsLabel, facts: facts,
     repoUrl: repoUrl, marketplaceUrl: marketplaceUrl,
     canArchive: canArchive, canUnarchive: canUnarchive, canFix: canFix, fixableCount: fixableCount

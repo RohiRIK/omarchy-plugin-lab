@@ -45,6 +45,13 @@ class CollectorTests(unittest.TestCase):
               "issue list"*) cat {cls.fixtures}/issues.json ;;
               "repo view me/me.gone"*) echo '{{"visibility":"PUBLIC","isArchived":true}}' ;;
               *registry.json*) cat {cls.fixtures}/registry.json ;;
+              "run list -R me/me.feature -b main"*) echo '[{{"status":"completed","conclusion":"success","url":"u","displayTitle":"t","workflowName":"w","headSha":"x","createdAt":"2026-09-01T00:00:00Z"}}]' ;;
+              "run list -R me/me.feature"*) echo '[{{"status":"completed","conclusion":"failure","url":"u","displayTitle":"branch","workflowName":"w","headSha":"y","createdAt":"2026-09-01T00:00:00Z"}}]' ;;
+              "pr list -R me/me.prs"*) cat {cls.fixtures}/prs.json ;;
+              "api repos/me/me.prs/issues?"*) cat {cls.fixtures}/prs-issues.json ;;
+              "api repos/me/me.prs/"*) echo '[]' ;;
+              "api repos/me/me.prs") echo '{{"stargazers_count":2,"forks_count":1,"subscribers_count":0,"pushed_at":"2026-09-01T00:00:00Z"}}' ;;
+              "api -X GET search/issues"*) echo '{{"items":[]}}' ;;
               *) exit 1 ;;
             esac
         """)
@@ -78,18 +85,52 @@ class CollectorTests(unittest.TestCase):
             cls.make(pid, remote=True)
         # a plugin you work on in ~/Work but never installed
         cls.make("me.workonly", remote=True, root=cls.work)
-        # installed checkout that lags behind its working copy
+        # installed clone that lags behind what is published (a newer commit was pushed from ~/Work)
         cls.make("me.split", remote=True)
-        sh(cls.plugins.parent, "git", "clone", "-q", str(cls.plugins / "me.split"), str(cls.work / "me.split"))
-        (cls.work / "me.split/new.qml").write_text("x")
-        sh(cls.work / "me.split", "git", "add", "-A")
-        sh(cls.work / "me.split", "git", "commit", "-qm", "newer")
+        cls.clone("me.split")
+        cls.commit(cls.work / "me.split", "newer")
+        sh(cls.work / "me.split", "git", "push", "-q", "origin", "main")
+
+        # working copy checked out on a feature branch; the bar runs published main (the rohi.network case)
+        cls.make("me.feature", remote=True)
+        cls.clone("me.feature")
+        sh(cls.work / "me.feature", "git", "checkout", "-q", "-b", "feat")
+        cls.commit(cls.work / "me.feature", "wip")
+
+        # installed as a symlink to the working copy, like nanoclaw
+        cls.make("me.linked", remote=True, root=cls.work)
+        (cls.plugins / "me.linked").symlink_to(cls.work / "me.linked")
+
+        # your own PR holds the commit your local main has; someone else also opened a PR
+        cls.make("me.prs", remote=True)
+        sh(cls.plugins / "me.prs", "git", "checkout", "-q", "-b", "fix")
+        cls.commit(cls.plugins / "me.prs", "fix it")
+        sh(cls.plugins / "me.prs", "git", "push", "-q", "origin", "fix")
+        sh(cls.plugins / "me.prs", "git", "checkout", "-q", "main")
+        sh(cls.plugins / "me.prs", "git", "merge", "-q", "--ff-only", "fix")
+        (cls.fixtures / "prs.json").write_text(json.dumps([{
+            "number": 1, "title": "Fix it", "headRefName": "fix", "url": "https://x/pr/1",
+            "mergeStateStatus": "BLOCKED", "reviewDecision": "REVIEW_REQUIRED",
+            "statusCheckRollup": [{"conclusion": "SUCCESS"}]}]))
+        pr = lambda n, by: {"number": n, "title": f"pr {n}", "user": {"login": by}, "html_url": f"https://x/pr/{n}",
+                            "created_at": "2026-09-01T00:00:00Z", "pull_request": {}}
+        (cls.fixtures / "prs-issues.json").write_text(json.dumps([pr(1, "me"), pr(2, "stranger")]))
+
+        # GitHub moves on after the last fetch
+        cls.make("me.moving", remote=True)
+        other = cls.plugins.parent / "moving-elsewhere"
+        sh(cls.plugins.parent, "git", "clone", "-q", "https://github.com/me/me.moving", str(other))
+        cls.commit(other, "pushed from elsewhere")
+        sh(other, "git", "push", "-q", "origin", "main")
+
+        cls.make("me.outdated", remote=True)
+        cls.make("me.old", remote=True)
 
         head = lambda pid: subprocess.run(["git", "-C", str(cls.plugins / pid), "rev-parse", "HEAD"],
                                           capture_output=True, text=True).stdout.strip()
         url = lambda pid: f"https://github.com/me/{pid}"
         body = lambda pid: f"### Repository URL\n\n{url(pid)}\n\n### Category\n\nSystem"
-        verify = lambda pid: f"### Verification action\n\nVerify\n\n### Repository URL\n\n{url(pid)}\n\n### Target commit\n\n{'a' * 40}"
+        verify = lambda pid, target: f"### Verification action\n\nVerify\n\n### Repository URL\n\n{url(pid)}\n\n### Target commit\n\n{target}"
         issue = lambda n, pid, labels, state="OPEN", b=None, comments=(): {
             "number": n, "title": pid, "state": state, "url": f"https://x/{n}", "updatedAt": "2026-09-01T00:00:00Z",
             "labels": [{"name": l} for l in labels], "body": b or body(pid), "comments": list(comments)}
@@ -99,17 +140,30 @@ class CollectorTests(unittest.TestCase):
             issue(2, "me.reviewed", ["submission", "needs-fixes"], comments=[review]),
             issue(3, "me.listed", ["submission", "listed"], state="CLOSED"),
             issue(4, "me.verifying", ["submission", "listed"], state="CLOSED"),
-            issue(5, "me.verifying", ["plugin-update"], b=verify("me.verifying")),
+            issue(5, "me.verifying", ["plugin-update"], b=verify("me.verifying", head("me.verifying"))),
+            issue(6, "me.outdated", ["submission", "listed"], state="CLOSED"),
+            issue(7, "me.outdated", ["plugin-update"], b=verify("me.outdated", "a" * 40)),
         ]))
         (cls.fixtures / "registry.json").write_text(json.dumps({"sources": [
             {"repo": url("me.listed"), "listedAt": "2026-09-03T00:00:00.000Z", "listingValidatedCommit": head("me.listed")},
             {"repo": url("me.verifying"), "listedAt": "2026-09-03T00:00:00.000Z", "listingValidatedCommit": "b" * 40},
             {"repo": url("me.stale"), "listedAt": "2026-09-03T00:00:00.000Z", "listingValidatedCommit": "c" * 40},
+            {"repo": url("me.outdated"), "listedAt": "2026-09-03T00:00:00.000Z", "listingValidatedCommit": "b" * 40},
         ]}))
 
     @classmethod
     def tearDownClass(cls):
         cls.tmp.cleanup()
+
+    @classmethod
+    def clone(cls, pid):
+        sh(cls.plugins.parent, "git", "clone", "-q", f"https://github.com/me/{pid}", str(cls.work / pid))
+
+    @staticmethod
+    def commit(repo, message):
+        (repo / (message.replace(" ", "-") + ".qml")).write_text(message)
+        sh(repo, "git", "add", "-A")
+        sh(repo, "git", "commit", "-qm", message)
 
     @classmethod
     def stub(cls, name, body):
@@ -158,15 +212,82 @@ class CollectorTests(unittest.TestCase):
 
     def test_stages(self):
         s = self.status()
-        stages = {k: v["stage"] for k, v in s.items() if k != "me.dirty"}
-        self.assertEqual(stages, {
+        expected = {
             "me.local": "local", "me.dev": "dev", "me.unpushed": "pushed",
             "me.published": "pushed", "me.released": "pushed", "me.failing": "pushed",
             "me.broken": "local", "them.widget": "installed",
             "me.submitted": "submitted", "me.reviewed": "needs-fixes", "me.listed": "listed",
             "me.verifying": "update", "me.stale": "update", "me.workonly": "pushed", "me.split": "pushed",
-            "me.gone": "archived", "me.retired": "pushed",
-        })
+            "me.gone": "archived", "me.retired": "pushed", "me.outdated": "update", "me.feature": "pushed",
+        }
+        self.assertEqual({k: s[k]["stage"] for k in expected}, expected)
+
+    # ---- accuracy: one test per way the panel has been, or could be, wrong ----
+
+    def test_feature_branch_checkout_is_not_a_stale_bar(self):
+        p = self.status()["me.feature"]
+        self.assertEqual((p["branch"], p["defaultBranch"]), ("feat", "main"))
+        self.assertNotIn("stale-install", self.codes(p))
+        self.assertNotIn("ahead", self.codes(p))
+        work = {w["name"]: w for w in p["openWork"]}
+        self.assertTrue(work["feat"]["current"])
+        self.assertEqual((work["feat"]["unpublished"], work["feat"]["pushed"]), (1, False))
+
+    def test_bar_behind_published_is_flagged_with_both_commits(self):
+        p = self.status()["me.split"]
+        i = next(i for i in p["issues"] if i["code"] == "stale-install")
+        self.assertIn("1 commit(s) behind GitHub main", i["text"])
+        self.assertIn(p["published"][:7], i["evidence"])
+        self.assertIn(p["running"]["head"][:7], i["evidence"])
+
+    def test_symlinked_install_runs_live(self):
+        p = self.status()["me.linked"]
+        self.assertEqual(p["running"]["kind"], "live")
+        self.assertNotIn("stale-install", self.codes(p))
+
+    def test_background_fetch_sees_github_move(self):
+        before = self.status()["me.moving"]
+        self.assertEqual(before["behind"], 0)
+        rc, out = self.collect("status", "--fetch-git")
+        after = {p["id"]: p for p in out["plugins"]}["me.moving"]
+        self.assertEqual(after["behind"], 1)
+        self.assertGreaterEqual(after["fetchedAt"], before["fetchedAt"])
+
+    def test_only_other_peoples_prs_need_you(self):
+        p = self.status()["me.prs"]
+        self.assertEqual(p["feedback"]["openPrs"], 1)
+        codes = self.codes(p)
+        self.assertIn("open-prs", codes)
+        self.assertNotIn("ahead", codes)
+        self.assertIn("ahead-in-pr", codes)
+        pr = next(w["pr"] for w in p["openWork"] if w["name"] == "fix")
+        self.assertEqual((pr["checks"], pr["merge"]), ("passing", "blocked: needs an approving review"))
+
+    def test_ci_comes_from_the_default_branch(self):
+        p = self.status()["me.feature"]
+        self.assertEqual(p["ci"]["conclusion"], "success")
+        self.assertNotIn("ci", self.codes(p))
+
+    def test_outdated_verify_request_needs_you(self):
+        s = self.status()
+        self.assertIn("verify-outdated", self.codes(s["me.outdated"]))
+        self.assertEqual(s["me.outdated"]["health"], "warn")
+        self.assertIn("verify", self.codes(s["me.verifying"]))
+        self.assertNotIn("verify-outdated", self.codes(s["me.verifying"]))
+
+    def test_default_branch_without_origin_head(self):
+        p = self.status()["me.published"]
+        self.assertEqual(p["defaultBranch"], "main")
+        self.assertTrue(p["published"])
+
+    def test_old_git_data_is_marked_stale(self):
+        fh = self.plugins / "me.old/.git/FETCH_HEAD"
+        old = __import__("time").time() - 7200
+        os.utime(fh, (old, old))
+        rc, out = self.collect("status")
+        p = {p["id"]: p for p in out["plugins"]}["me.old"]
+        self.assertIn("git", p["stale"])
+        self.assertIn("git", out["stale"])
 
     def test_repo_archived_on_github_stops_raising_issues(self):
         p = self.status()["me.gone"]
@@ -232,6 +353,7 @@ class CollectorTests(unittest.TestCase):
         self.assertNotIn("me.gone", prompt)
         self.assertNotIn("them.widget", prompt)
         self.assertLess(prompt.index("me.broken"), prompt.index("me.split"))
+        self.assertIn("explain <id>", prompt)
         self.assertIn("ask me before pushing", prompt)
 
     def test_work_dir_plugins_are_found_even_when_not_installed(self):
