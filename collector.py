@@ -40,6 +40,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -85,12 +86,35 @@ def read_json(path, default=None):
         return default
 
 
+def ensure_private_dir(path):
+    path = Path(path)
+    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    for root in (CACHE_DIR, CONFIG_DIR):
+        if path == root or root in path.parents:
+            cur = path
+            while True:
+                cur.chmod(0o700)
+                if cur == root:
+                    break
+                cur = cur.parent
+    path.chmod(0o700)
+
+
 def write_json(path, data):
     path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(data, indent=2))
-    tmp.replace(path)
+    ensure_private_dir(path.parent)
+    fd, tmp = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=path.parent)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w") as fh:
+            fh.write(json.dumps(data, indent=2))
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def cached(name, key, ttl, compute, force=False):
@@ -222,14 +246,14 @@ def feedback_now(repo, pid, owners):
     comments = gh_json("api", f"repos/{repo}/issues/comments?per_page=30&sort=created&direction=desc") or []
     reviews = gh_json("api", f"repos/{repo}/pulls/comments?per_page=30&sort=created&direction=desc") or []
     items = [{"kind": "pr" if "pull_request" in i else "issue", "number": i["number"],
-              "title": i["title"], "by": i["user"]["login"], "url": i["html_url"],
+              "by": i["user"]["login"], "url": i["html_url"],
               "at": iso_ts(i["created_at"])} for i in open_items]
     talk = [{"by": c["user"]["login"], "url": c["html_url"], "at": iso_ts(c["created_at"]), "where": "repo",
              "text": first_line(c.get("body"))}
             for c in comments + reviews if others(c["user"]["login"])]
-    talk += [{"by": i["by"], "url": i["url"], "at": i["at"], "where": "repo",
-              "text": f"opened {i['kind']} #{i['number']}: {i['title']}"}
-             for i in items if others(i["by"])]
+    talk += [{"by": i["user"]["login"], "url": i["html_url"], "at": iso_ts(i["created_at"]), "where": "repo",
+              "text": f"opened {'pr' if 'pull_request' in i else 'issue'} #{i['number']}: {i['title']}"}
+             for i in open_items if others(i["user"]["login"])]
     # Upstream Omarchy: issues, PRs and discussions that link the repo or name the plugin id.
     mentions = []
     for q in (f'"{repo}"', f'"{pid}"'):
@@ -466,7 +490,7 @@ def running_copy(installed, work, linked=False):
 
 def own_prs_now(repo, login):
     prs = gh_json("pr", "list", "-R", repo, "--author", login, "--state", "open", "--json",
-                  "number,title,headRefName,url,mergeStateStatus,reviewDecision,statusCheckRollup")
+                  "number,headRefName,url,mergeStateStatus,reviewDecision,statusCheckRollup")
     if prs is None:
         return None
     out = []
@@ -483,7 +507,7 @@ def own_prs_now(repo, login):
                  "UNSTABLE": "checks not green", "DRAFT": "draft"}.get(p.get("mergeStateStatus"), "")
         if p.get("mergeStateStatus") == "BLOCKED":
             merge = "blocked: needs an approving review" if p.get("reviewDecision") == "REVIEW_REQUIRED" else "blocked"
-        out.append({"number": p["number"], "title": p["title"], "branch": p["headRefName"], "url": p["url"],
+        out.append({"number": p["number"], "branch": p["headRefName"], "url": p["url"],
                     "checks": checks, "merge": merge})
     return out
 
@@ -559,7 +583,7 @@ def inspect(pid, where, owners, enabled, fetch=False, market=None):
     if info["mine"] and repo and not info["archived"]:
         def ci_now():
             runs = gh_json("run", "list", "-R", repo, "-b", default, "-L", "1", "--json",
-                           "status,conclusion,headSha,url,displayTitle,workflowName,createdAt")
+                           "status,conclusion,headSha,url,workflowName,createdAt")
             if runs is None:
                 return None
             return runs[0] if runs else {"status": "none"}
@@ -667,7 +691,8 @@ def inspect(pid, where, owners, enabled, fetch=False, market=None):
         ci = info["ci"] or {}
         ci_ev = f"latest run on {default} · checked {ago(info['checked'].get('ci', 0))}"
         if ci.get("conclusion") == "failure":
-            issue("error", "ci", f"CI failing on {default}: {ci.get('workflowName', '')} “{ci.get('displayTitle', '')}”", ci_ev)
+            wf = f": {ci['workflowName']}" if ci.get("workflowName") else ""
+            issue("error", "ci", f"CI failing on {default}{wf}", ci_ev)
         elif ci.get("status") in ("in_progress", "queued"):
             issue("info", "ci-running", f"CI is running on {default}", ci_ev)
         elif info["repo"] and ci.get("status") == "none":
@@ -827,10 +852,12 @@ def run_tests(pid):
     if not cmd:
         return {"error": f"{pid} has no test suite"}
     log = CACHE_DIR / "tests" / f"{pid}.log"
-    log.parent.mkdir(parents=True, exist_ok=True)
+    ensure_private_dir(log.parent)
     started = time.time()
+    fd = os.open(log, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    os.fchmod(fd, 0o600)
     try:
-        with open(log, "w") as fh:
+        with os.fdopen(fd, "w") as fh:
             p = subprocess.run(cmd, cwd=real, stdout=fh, stderr=subprocess.STDOUT, timeout=TEST_TIMEOUT)
         code = p.returncode
     except subprocess.TimeoutExpired:
@@ -896,7 +923,7 @@ def plugin_block(info):
         for c in sorted(mk.get("reviews", []), key=lambda c: c["at"]):
             lines.append(f"--- {c['by']}:\n{c['body']}")
     for i in (info.get("feedback") or {}).get("items", []):
-        lines.append(f"Open {i['kind']} #{i['number']} by {i['by']}: {i['title']} ({i['url']})")
+        lines.append(f"Open {i['kind']} #{i['number']} ({i['url']})")
     t = info.get("tests") or {}
     if t and not t.get("ok"):
         lines.append(f"Last local test log: {t.get('log')}")

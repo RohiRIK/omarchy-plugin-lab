@@ -47,6 +47,7 @@ class CollectorTests(unittest.TestCase):
               *registry.json*) cat {cls.fixtures}/registry.json ;;
               "run list -R me/me.feature -b main"*) echo '[{{"status":"completed","conclusion":"success","url":"u","displayTitle":"t","workflowName":"w","headSha":"x","createdAt":"2026-09-01T00:00:00Z"}}]' ;;
               "run list -R me/me.feature"*) echo '[{{"status":"completed","conclusion":"failure","url":"u","displayTitle":"branch","workflowName":"w","headSha":"y","createdAt":"2026-09-01T00:00:00Z"}}]' ;;
+              "run list -R me/me.prs -b main"*) echo '[{{"status":"completed","conclusion":"failure","url":"https://x/runs/9","displayTitle":"Secret CI title","workflowName":"test","headSha":"z","createdAt":"2026-09-01T00:00:00Z"}}]' ;;
               "pr list -R me/me.prs"*) cat {cls.fixtures}/prs.json ;;
               "api repos/me/me.prs/issues?"*) cat {cls.fixtures}/prs-issues.json ;;
               "api repos/me/me.prs/"*) echo '[]' ;;
@@ -428,6 +429,48 @@ class CollectorTests(unittest.TestCase):
         rc, _ = self.collect("seen", "me.dev")
         self.assertEqual(rc, 0)
         self.assertIn("me.dev", json.loads((self.cache / "seen.json").read_text()))
+
+    def test_cache_and_config_are_owner_only_under_umask_022(self):
+        old_umask = os.umask(0o022)
+        try:
+            self.collect("status")
+            self.collect("test", "me.published")
+            self.collect("seen", "me.dev")
+            self.collect("archive", "me.retired")
+            self.collect("unarchive", "me.retired")
+        finally:
+            os.umask(old_umask)
+        config_dir = Path(self.env["PLUGIN_LAB_CONFIG_DIR"])
+        for d in (self.cache, self.cache / "tests", config_dir):
+            self.assertEqual(d.stat().st_mode & 0o777, 0o700, f"{d} should be 0700")
+        files = [p for p in self.cache.rglob("*") if p.is_file()] + [config_dir / "archived.json"]
+        self.assertTrue(files)
+        for f in files:
+            self.assertEqual(f.stat().st_mode & 0o777, 0o600, f"{f} should be 0600")
+
+    def test_fix_prompt_and_agent_argv_omit_issue_and_pr_titles(self):
+        argv_file = self.fixtures / "agent-argv.json"
+        self.stub("omarchy-agent-prompt", f"""
+            python3 -c 'import json, sys; open(sys.argv[1], "w").write(json.dumps(sys.argv[2:]))' "{argv_file}" "$@"
+        """)
+        rc, r = self.collect("prompt", "me.prs")
+        self.assertEqual(rc, 0)
+        self.assertIn("Open pr #2 (https://x/pr/2)", r["prompt"])
+        for secret in ("pr 1", "pr 2", "Fix it", "Secret CI title"):
+            self.assertNotIn(secret, r["prompt"])
+        rc, all_r = self.collect("prompt-all")
+        self.assertEqual(rc, 0)
+        for secret in ("pr 1", "pr 2", "Fix it", "Secret CI title"):
+            self.assertNotIn(secret, all_r["prompt"])
+        rc, _ = self.collect("fix", "me.prs")
+        self.assertEqual(rc, 0)
+        for _ in range(50):
+            if argv_file.exists() and argv_file.stat().st_size > 0:
+                break
+            __import__("time").sleep(0.02)
+        argv = "\n".join(json.loads(argv_file.read_text()))
+        for secret in ("pr 1", "pr 2", "Fix it", "Secret CI title"):
+            self.assertNotIn(secret, argv)
 
 
 if __name__ == "__main__":
