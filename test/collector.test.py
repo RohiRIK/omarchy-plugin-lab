@@ -112,7 +112,10 @@ class CollectorTests(unittest.TestCase):
         (cls.fixtures / "prs.json").write_text(json.dumps([{
             "number": 1, "title": "Fix it", "headRefName": "fix", "url": "https://x/pr/1",
             "mergeStateStatus": "BLOCKED", "reviewDecision": "REVIEW_REQUIRED",
-            "statusCheckRollup": [{"conclusion": "SUCCESS"}]}]))
+            "statusCheckRollup": [{"conclusion": "SUCCESS"}]}, {
+            "number": 3, "title": "Hush", "headRefName": "secret-branch-name", "url": "https://x/pr/3",
+            "mergeStateStatus": "DIRTY", "reviewDecision": "",
+            "statusCheckRollup": [{"conclusion": "FAILURE"}]}]))
         pr = lambda n, by: {"number": n, "title": f"pr {n}", "user": {"login": by}, "html_url": f"https://x/pr/{n}",
                             "created_at": "2026-09-01T00:00:00Z", "pull_request": {}}
         (cls.fixtures / "prs-issues.json").write_text(json.dumps([pr(1, "me"), pr(2, "stranger")]))
@@ -471,6 +474,49 @@ class CollectorTests(unittest.TestCase):
         argv = "\n".join(json.loads(argv_file.read_text()))
         for secret in ("pr 1", "pr 2", "Fix it", "Secret CI title"):
             self.assertNotIn(secret, argv)
+
+    def test_pre_upgrade_cache_and_config_are_tightened_before_reads(self):
+        self.collect("status")
+        self.collect("test", "me.published")
+        self.collect("archive", "me.retired")
+        self.collect("unarchive", "me.retired")
+        config_dir = Path(self.env["PLUGIN_LAB_CONFIG_DIR"])
+        # what an older Plugin Lab left behind under umask 022
+        for root in (self.cache, config_dir):
+            for p in [root, *root.rglob("*")]:
+                p.chmod(0o755 if p.is_dir() else 0o644)
+        old_umask = os.umask(0o022)
+        try:
+            rc, _ = self.collect("explain", "me.published")  # served from the warm cache
+        finally:
+            os.umask(old_umask)
+        self.assertEqual(rc, 0)
+        for root in (self.cache, config_dir):
+            for p in [root, *root.rglob("*")]:
+                want = 0o700 if p.is_dir() else 0o600
+                self.assertEqual(p.stat().st_mode & 0o777, want, f"{p} should be {oct(want)}")
+
+    def test_fix_prompt_and_agent_argv_omit_private_pr_branch_names(self):
+        p = self.status()["me.prs"]
+        self.assertIn("own-pr", self.codes(p))
+        argv_file = self.fixtures / "agent-argv-branch.json"
+        self.stub("omarchy-agent-prompt", f"""
+            python3 -c 'import json, sys; open(sys.argv[1], "w").write(json.dumps(sys.argv[2:]))' "{argv_file}" "$@"
+        """)
+        rc, r = self.collect("prompt", "me.prs")
+        self.assertEqual(rc, 0)
+        self.assertIn("Your PR #3", r["prompt"])
+        self.assertNotIn("secret-branch-name", r["prompt"])
+        rc, all_r = self.collect("prompt-all")
+        self.assertEqual(rc, 0)
+        self.assertNotIn("secret-branch-name", all_r["prompt"])
+        rc, _ = self.collect("fix", "me.prs")
+        self.assertEqual(rc, 0)
+        for _ in range(50):
+            if argv_file.exists() and argv_file.stat().st_size > 0:
+                break
+            __import__("time").sleep(0.02)
+        self.assertNotIn("secret-branch-name", "\n".join(json.loads(argv_file.read_text())))
 
 
 if __name__ == "__main__":

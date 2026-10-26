@@ -100,6 +100,27 @@ def ensure_private_dir(path):
     path.chmod(0o700)
 
 
+_migrated = False
+
+
+def migrate_private_state():
+    """Tighten cache and config written by older versions (0644/0755 under umask 022)
+    before anything in them is read. Runs once per process."""
+    global _migrated
+    if _migrated:
+        return
+    _migrated = True
+    for root in (CACHE_DIR, CONFIG_DIR):
+        if root.is_symlink() or not root.is_dir():
+            continue
+        for d, dirs, files in os.walk(root):
+            os.chmod(d, 0o700)
+            for f in files:
+                f = os.path.join(d, f)
+                if not os.path.islink(f):
+                    os.chmod(f, 0o600)
+
+
 def write_json(path, data):
     path = Path(path)
     ensure_private_dir(path.parent)
@@ -119,6 +140,7 @@ def write_json(path, data):
 
 def cached(name, key, ttl, compute, force=False):
     """Memoise `compute()` in the cache dir for `ttl` seconds. None is not cached."""
+    migrate_private_state()
     store = read_json(CACHE_DIR / name, {}) or {}
     hit = store.get(key)
     if hit and not force and time.time() - hit.get("at", 0) < ttl:
@@ -705,7 +727,8 @@ def inspect(pid, where, owners, enabled, fetch=False, market=None):
             issue("warn", "open-prs", f"{fb['openPrs']} pull request(s) from others waiting for your review")
         for pr in info["ownPrs"]:
             if pr["checks"] == "failing" or pr["merge"] == "has conflicts":
-                issue("warn", "own-pr", f"Your PR #{pr['number']} ({pr['branch']}): "
+                # no branch name: it can be private, and issue text reaches the agent's argv
+                issue("warn", "own-pr", f"Your PR #{pr['number']}: "
                       + ("checks failing" if pr["checks"] == "failing" else "has conflicts"), pr["url"])
         if fb.get("upstreamMentions"):
             issue("info", "upstream", f"Mentioned {len(fb['upstreamMentions'])} time(s) in {UPSTREAM}")
@@ -1009,6 +1032,7 @@ def main(argv):
     if not argv:
         print(__doc__, file=sys.stderr)
         return 2
+    migrate_private_state()
     cmd, rest = argv[0], argv[1:]
     if cmd == "status":
         out = status(fetch="--fetch" in rest, fetch_git="--fetch-git" in rest)
